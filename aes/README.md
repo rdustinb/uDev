@@ -9,6 +9,7 @@ feedback data block, but the originally expanded key will not change
 until the actual cipher key changes.
 
 First, setup the storage and pointers for the key and data:
+```
     // Expected 256-bit Encryption
     byte original256Data[16] = {0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff};
     byte* original256DataPtr = original256Data;
@@ -16,8 +17,10 @@ First, setup the storage and pointers for the key and data:
     byte* original256KeyEncPtr = original256KeyEnc;
     byte expanded256Key[256];
     byte* expanded256KeyPtr = expanded256Key;
+```
 
 Next, expand the key:
+```
     // Expand the Key
     for(int j=0; j<32; j++){
         expanded256KeyPtr[j] = original256KeyEncPtr[j];
@@ -29,8 +32,11 @@ Next, expand the key:
             expanded256KeyPtr[((i*32)+j)] = original256KeyEncPtr[j];
         }
     }
+```
 
 Finally, encrypt/decrypt passing in the expanded key:
+```
     aesEncrypt(original256DataPtr, expanded256KeyPtr, 256);
     // -- OR --
     aesDecrypt(original256DataPtr, expanded256KeyPtr, 256);
+```
