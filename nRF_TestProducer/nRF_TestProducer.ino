@@ -40,13 +40,13 @@
   #define __DEBUG
 #endif
 
-/*#ifndef __CONSUMER*/
-  /*#define __CONSUMER*/
-/*#endif*/
-
-#ifndef __PRODUCER0
-  #define __PRODUCER0
+#ifndef __CONSUMER
+  #define __CONSUMER
 #endif
+
+/*#ifndef __PRODUCER0*/
+  /*#define __PRODUCER0*/
+/*#endif*/
 
 //#ifndef __PRODUCER1
 //  #define __PRODUCER1
@@ -58,6 +58,9 @@
 
 // Consumer Address, Teensy Device
 #ifdef __CONSUMER
+  #include "Timer.h"
+  Timer t;
+  static long TIMEOUTDELAY = 60000;
   int THISADDR[5] = {0xdb,0x00,0x00,0x00,0x00};
   int THATADDR0[5] = {0xdb,0x10,0x00,0x00,0x00};
   int THATADDR1[5] = {0xdb,0x10,0x00,0x00,0x01};
@@ -353,41 +356,14 @@ void read_rxAddr(int rxPipe){
 }
 
 /*********************************/
-/********** ISR Routine **********/
+/******** Timer Routine **********/
 /*********************************/
-void nrfIsr(){
-  // Branch based on if this is a producer or a consumer
-  #ifdef __CONSUMER
-    TIMEREXPIRED = 1;
-  #endif
-  #ifndef __CONSUMER
-    RXCOMMAND = 1;
-  #endif
-}
-
-/*********************************/
-/********** Main Setup ***********/
-/*********************************/
-void setup() {
-  // Setup Serial Monitor
-  Serial.begin(115200);
-  // Join the I2C Bus as Master
-  Wire.begin();
-  // Setup the nRF Pins
-  pinMode(NRFCSn, OUTPUT);
-  //pinMode(NRFIRQn, INPUT);
-  pinMode(NRFCE, OUTPUT);
-  // Begin SPI for the nRF Device
-  SPI.begin();
-  // Attach the interrupt
-  attachInterrupt(digitalPinToInterrupt(NRFIRQn), nrfIsr, FALLING);
-}
-
-/*********************************/
-/*********** Main Loop ***********/
-/*********************************/
-void loop() {
-  // Write My Address
+#ifdef __CONSUMER
+void sendReq(){
+  // The Consumer simply waits until the hardware expires and then sends
+  // a request to each enumerated producer device in it's device list.
+  // For now when the timer expires the consumer writes and reads back a
+  // new self-address and samples its own HTU21D.
   write_rxAddr(pipeSel, THISADDR);
   read_rxAddr(pipeSel);
   pipeSel++;
@@ -395,10 +371,6 @@ void loop() {
     pipeSel = 0;
   }
 
-  // The Producer does nothing, it waits for a command from the consumer/server
-  // Check that this is a command to return sensor data
-  // Read the Sensor
-#ifdef __CONSUMER
   float temperature = read_sensor_value(0);
   float humidity = read_sensor_value(1);
   Serial.print("Sensor temperature is: ");
@@ -415,7 +387,46 @@ void loop() {
   Serial.println(nrf_data, HEX);
   Serial.println(" ");
   Serial.println(" ");
+}
 #endif
+
+/*********************************/
+/********** ISR Routine **********/
+/*********************************/
+#ifndef __CONSUMER
+void nrfIsr(){
+  RXCOMMAND = 1;
+}
+#endif
+
+/*********************************/
+/********** Main Setup ***********/
+/*********************************/
+void setup() {
+  // Setup Serial Monitor
+  Serial.begin(115200);
+  // Join the I2C Bus as Master
+  Wire.begin();
+  // Setup the nRF Pins
+  pinMode(NRFCSn, OUTPUT);
+  //pinMode(NRFIRQn, INPUT);
+  pinMode(NRFCE, OUTPUT);
+  // Begin SPI for the nRF Device
+  SPI.begin();
+  #ifdef __CONSUMER
+    // Create the timer, calls a function every 60 seconds
+    t.every(TIMEOUTDELAY, sendReq);
+  #endif
+  #ifndef __CONSUMER
+    // Attach the interrupt for producers, waits for incoming packet
+    attachInterrupt(digitalPinToInterrupt(NRFIRQn), nrfIsr, FALLING);
+  #endif
+}
+
+/*********************************/
+/*********** Main Loop ***********/
+/*********************************/
+void loop() {
 #ifndef __CONSUMER
   if(RXCOMMAND == 1){
     // nRF has thrown an interrupt, now process it
@@ -460,5 +471,4 @@ void loop() {
     RXCOMMAND = 0;
   }
 #endif
-  delay(10000);
 }
