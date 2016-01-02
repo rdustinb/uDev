@@ -60,12 +60,11 @@
 #ifdef __CONSUMER
   #include "Timer.h"
   Timer t;
-  static long TIMEOUTDELAY = 60000;
+  static long TIMEOUTDELAY = 5000;
   int THISADDR[5] = {0xdb,0x00,0x00,0x00,0x00};
   int THATADDR0[5] = {0xdb,0x10,0x00,0x00,0x00};
   int THATADDR1[5] = {0xdb,0x10,0x00,0x00,0x01};
   int THATADDR2[5] = {0xdb,0x10,0x00,0x00,0x02};
-  volatile int TIMEREXPIRED = 0;
   #ifndef __TEENSY
     #define __TEENSY
   #endif
@@ -358,37 +357,44 @@ void read_rxAddr(int rxPipe){
 /*********************************/
 /******** Timer Routine **********/
 /*********************************/
-#ifdef __CONSUMER
 void sendReq(){
+  // Print out the milliseconds, is the timer library fairly accurate?
+  #ifdef __DEBUG
+    Serial.print("60 second tick: millis()=");
+    Serial.println(millis(), DEC);
+  #endif
   // The Consumer simply waits until the hardware expires and then sends
   // a request to each enumerated producer device in it's device list.
   // For now when the timer expires the consumer writes and reads back a
   // new self-address and samples its own HTU21D.
-  write_rxAddr(pipeSel, THISADDR);
-  read_rxAddr(pipeSel);
-  pipeSel++;
-  if(pipeSel > 5){
-    pipeSel = 0;
-  }
+  #ifdef __DEBUG
+    write_rxAddr(pipeSel, THISADDR);
+    read_rxAddr(pipeSel);
+    pipeSel++;
+    if(pipeSel > 5){
+      pipeSel = 0;
+    }
+  #endif
 
   float temperature = read_sensor_value(0);
   float humidity = read_sensor_value(1);
-  Serial.print("Sensor temperature is: ");
-  Serial.println(temperature);
-  Serial.print("Sensor humidity is: ");
-  Serial.println(humidity);
+  #ifdef __DEBUG
+    Serial.print("Sensor temperature is: ");
+    Serial.println(temperature);
+    Serial.print("Sensor humidity is: ");
+    Serial.println(humidity);
 
-  // Read the STATUS Register
-  char nrf_data = read_status();
-  Serial.print("STATUS register value is: 0x");
-  Serial.println(nrf_data, HEX);
-  nrf_data = read_rfsetup();
-  Serial.print("RF_SETUP register value is: 0x");
-  Serial.println(nrf_data, HEX);
-  Serial.println(" ");
-  Serial.println(" ");
+    // Read the STATUS Register
+    char nrf_data = read_status();
+    Serial.print("STATUS register value is: 0x");
+    Serial.println(nrf_data, HEX);
+    nrf_data = read_rfsetup();
+    Serial.print("RF_SETUP register value is: 0x");
+    Serial.println(nrf_data, HEX);
+    Serial.println(" ");
+    Serial.println(" ");
+  #endif
 }
-#endif
 
 /*********************************/
 /********** ISR Routine **********/
@@ -415,7 +421,7 @@ void setup() {
   SPI.begin();
   #ifdef __CONSUMER
     // Create the timer, calls a function every 60 seconds
-    t.every(TIMEOUTDELAY, sendReq);
+    t.every(10000, sendReq);
   #endif
   #ifndef __CONSUMER
     // Attach the interrupt for producers, waits for incoming packet
@@ -427,6 +433,9 @@ void setup() {
 /*********** Main Loop ***********/
 /*********************************/
 void loop() {
+#ifdef __CONSUMER
+  t.update();
+#endif
 #ifndef __CONSUMER
   if(RXCOMMAND == 1){
     // nRF has thrown an interrupt, now process it
