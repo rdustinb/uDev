@@ -66,7 +66,6 @@
 #define NRFIRQn     3
 #define NRFCE       4
 volatile int newAddress[5] = {0x01,0x23,0x45,0x67,0x89};
-#endif
 enum producerStates {IDLE,WAITFORRX,RXCOMMAND,SAMPLEDATA,CDSETUP,CARRIERCHECK,
   DELAYTOTX,TXDATA,WAITFORSTATUS,DECODESTATUS,CARRIERFAILURE,RETRYFAILURE};
 producerStates state = IDLE;
@@ -89,6 +88,84 @@ void nrfISR(){
   #endif
   nrfResults = 1;
   sei();
+}
+
+/*********************************/
+/********* nRf Functions *********/
+/*********************************/
+void clear_fifos(){
+  // Clear Rx FIFOs
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(FLUSH_RX);
+  digitalWrite(NRFCSn, HIGH);
+  // Clear Tx FIFOs
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(FLUSH_TX);
+  digitalWrite(NRFCSn, HIGH);
+}
+
+void clear_flags(){
+  // Clear STATUS Flags
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(STATUS+W_REGISTER);
+  SPI.transfer(0x70);
+  digitalWrite(NRFCSn, HIGH);
+}
+
+void power_down(){
+  // Disable Chip Enable (Kills Rx Mode, mostly)
+  digitalWrite(NRFCE, LOW);
+  delay(5);
+  // Power Down
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(CONFIG+W_REGISTER);  // Write Reg (001x_xxxx)
+  SPI.transfer(0x00);               // Power Down
+  digitalWrite(NRFCSn, HIGH);
+}
+
+void power_up_rx(){
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(CONFIG+W_REGISTER);  // Write Reg (001x_xxxx)
+  SPI.transfer(0x0B);               // CRC Enabled, Powerup Enabled, PRIM_RX Hi
+  digitalWrite(NRFCSn, HIGH);
+}
+
+void power_up_tx(){
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(CONFIG+W_REGISTER);  // Write Reg (001x_xxxx)
+  SPI.transfer(0x0A);               // CRC Enabled, Powerup Enabled, PRIM_RX Lo
+  digitalWrite(NRFCSn, HIGH);
+}
+
+char get_status(){
+  char temp;
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(STATUS);
+  temp = SPI.transfer(NOP);
+  digitalWrite(NRFCSn, HIGH);
+  return temp;
+}
+
+char get_top_rx_fifo_count(){
+  char temp;
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(R_RX_PL_WID);
+  temp = SPI.transfer(NOP);
+  digitalWrite(NRFCSn, HIGH);
+  return temp;
+}
+
+bool get_carrier_detect_flag(){
+  char temp;
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(CARRIERDETECT);
+  temp = SPI.transfer(NOP);
+  digitalWrite(NRFCSn, HIGH);
+  if(temp == 0x0){
+    return false;
+  }else{
+    return true;
+  }
 }
 
 /*********************************/
@@ -187,6 +264,7 @@ void setup(){
 void loop(){
   // Loop Variables
   char rdCnt = 0;
+  char payloadByteCountTop = 0;
 
   // Loop Decode
   switch(state){
@@ -214,7 +292,7 @@ void loop(){
       break;
     case RXCOMMAND:
       // Get number of bytes received
-      char payloadByteCountTop = get_top_rx_fifo_count();
+      payloadByteCountTop = get_top_rx_fifo_count();
       #ifdef DATAFLOW
       Serial.print("Bytes in top Rx FIFO: ");
       Serial.println(payloadByteCountTop, DEC);
@@ -496,83 +574,5 @@ void loop(){
       power_down();
       state = IDLE;
       break;
-  }
-}
-
-/*********************************/
-/********* nRf Functions *********/
-/*********************************/
-void clear_fifos(){
-  // Clear Rx FIFOs
-  digitalWrite(NRFCSn, LOW);
-  SPI.transfer(FLUSH_RX);
-  digitalWrite(NRFCSn, HIGH);
-  // Clear Tx FIFOs
-  digitalWrite(NRFCSn, LOW);
-  SPI.transfer(FLUSH_TX);
-  digitalWrite(NRFCSn, HIGH);
-}
-
-void clear_flags(){
-  // Clear STATUS Flags
-  digitalWrite(NRFCSn, LOW);
-  SPI.transfer(STATUS+W_REGISTER);
-  SPI.transfer(0x70);
-  digitalWrite(NRFCSn, HIGH);
-}
-
-void power_down(){
-  // Disable Chip Enable (Kills Rx Mode, mostly)
-  digitalWrite(NRFCE, LOW);
-  sleep(5);
-  // Power Down
-  digitalWrite(NRFCSn, LOW);
-  SPI.transfer(CONFIG+W_REGISTER);  // Write Reg (001x_xxxx)
-  SPI.transfer(0x00);               // Power Down
-  digitalWrite(NRFCSn, HIGH);
-}
-
-void power_up_rx(){
-  digitalWrite(NRFCSn, LOW);
-  SPI.transfer(CONFIG+W_REGISTER);  // Write Reg (001x_xxxx)
-  SPI.transfer(0x0B);               // CRC Enabled, Powerup Enabled, PRIM_RX Hi
-  digitalWrite(NRFCSn, HIGH);
-}
-
-void power_up_tx(){
-  digitalWrite(NRFCSn, LOW);
-  SPI.transfer(CONFIG+W_REGISTER);  // Write Reg (001x_xxxx)
-  SPI.transfer(0x0A);               // CRC Enabled, Powerup Enabled, PRIM_RX Lo
-  digitalWrite(NRFCSn, HIGH);
-}
-
-char get_status(){
-  char temp;
-  digitalWrite(NRFCSn, LOW);
-  SPI.transfer(STATUS);
-  temp = SPI.transfer(NOP);
-  digitalWrite(NRFCSn, HIGH);
-  return temp;
-}
-
-char get_top_rx_fifo_count(){
-  char temp;
-  digitalWrite(NRFCSn, LOW);
-  SPI.transfer(R_RX_PL_WID);
-  temp = SPI.transfer(NOP);
-  digitalWrite(NRFCSn, HIGH);
-  return temp;
-}
-
-bool get_carrier_detect_flag(){
-  char temp;
-  digitalWrite(NRFCSn, LOW);
-  SPI.transfer(CARRIERDETECT);
-  temp = SPI.transfer(NOP);
-  digitalWrite(NRFCSn, HIGH);
-  if(temp == 0x0){
-    return false;
-  }else{
-    return true;
   }
 }

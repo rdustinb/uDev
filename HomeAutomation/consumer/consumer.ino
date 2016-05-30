@@ -58,11 +58,7 @@
 #define NRFCSn      10
 #define NRFIRQn     6
 #define NRFCE       4
-int newAddress[3][5] = {
-  {0x01,0x23,0x45,0x67,0x89},
-  {0x01,0x23,0x45,0x67,0x8a},
-  {0x01,0x23,0x45,0x67,0x8b}
-};
+int newAddress[5] = {0x01,0x23,0x45,0x67,0x89};
 enum consumerStates {IDLE,CDSETUP,CARRIERCHECK,DELAYTOTX,TXCOMMAND,WAITFORSTATUS,
   DECODESTATUS,SETUPRX,WAITFORRX,RXDATA,CARRIERFAILURE,RETRYFAILURE};
 consumerStates state = IDLE;
@@ -78,6 +74,84 @@ volatile unsigned long currentBootTime = 0;
 
 volatile unsigned long totalHandshakes;
 volatile unsigned long failedHandshakes;
+
+/*********************************/
+/********* nRf Functions *********/
+/*********************************/
+void clear_fifos(){
+  // Clear Rx FIFOs
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(FLUSH_RX);
+  digitalWrite(NRFCSn, HIGH);
+  // Clear Tx FIFOs
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(FLUSH_TX);
+  digitalWrite(NRFCSn, HIGH);
+}
+
+void clear_flags(){
+  // Clear STATUS Flags
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(STATUS+W_REGISTER);
+  SPI.transfer(0x70);
+  digitalWrite(NRFCSn, HIGH);
+}
+
+void power_down(){
+  // Disable Chip Enable (Kills Rx Mode, mostly)
+  digitalWrite(NRFCE, LOW);
+  delay(5);
+  // Power Down
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(CONFIG+W_REGISTER);  // Write Reg (001x_xxxx)
+  SPI.transfer(0x00);               // Power Down
+  digitalWrite(NRFCSn, HIGH);
+}
+
+void power_up_rx(){
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(CONFIG+W_REGISTER);  // Write Reg (001x_xxxx)
+  SPI.transfer(0x0B);               // CRC Enabled, Powerup Enabled, PRIM_RX Hi
+  digitalWrite(NRFCSn, HIGH);
+}
+
+void power_up_tx(){
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(CONFIG+W_REGISTER);  // Write Reg (001x_xxxx)
+  SPI.transfer(0x0A);               // CRC Enabled, Powerup Enabled, PRIM_RX Lo
+  digitalWrite(NRFCSn, HIGH);
+}
+
+char get_status(){
+  char temp;
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(STATUS);
+  temp = SPI.transfer(NOP);
+  digitalWrite(NRFCSn, HIGH);
+  return temp;
+}
+
+char get_top_rx_fifo_count(){
+  char temp;
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(R_RX_PL_WID);
+  temp = SPI.transfer(NOP);
+  digitalWrite(NRFCSn, HIGH);
+  return temp;
+}
+
+bool get_carrier_detect_flag(){
+  char temp;
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(CARRIERDETECT);
+  temp = SPI.transfer(NOP);
+  digitalWrite(NRFCSn, HIGH);
+  if(temp == 0x0){
+    return false;
+  }else{
+    return true;
+  }
+}
 
 /*********************************/
 /********* Req Timer ISR *********/
@@ -182,9 +256,6 @@ void setup(){
   Serial.begin(115200);
   totalHandshakes = 0;
   failedHandshakes = 0;
-  #ifdef HTU21D
-    Wire.begin();
-  #endif
   // Setup the nRF Pins
   pinMode(NRFCSn, OUTPUT);
   pinMode(NRFIRQn, INPUT_PULLUP);
@@ -205,6 +276,11 @@ void setup(){
 /*********** Main Loop ***********/
 /*********************************/
 void loop(){
+  // Loop Variables
+  char payloadByteCountTop = 0;
+  word humidity = 0;
+  word temperature = 0;
+
   // This "updates" the timer, kind of lame but apparently it works
   // may need to factor in variance when other code is running.
   reqTimer.update();
@@ -221,7 +297,6 @@ void loop(){
         Serial.println("Consumer Loop >> IDLE going to DELAYTOTX");
         #endif
         state = DELAYTOTX;
-      }else if(nrfResults == 1){
       }
       break;
     case CDSETUP:
@@ -390,7 +465,7 @@ void loop(){
       // Disable Rx
       digitalWrite(NRFCE, LOW);
       // Get number of bytes received
-      char payloadByteCountTop = get_top_rx_fifo_count();
+      payloadByteCountTop = get_top_rx_fifo_count();
       #ifdef DATAFLOW
       Serial.print("Bytes reported in top FIFO entry is: ");
       Serial.println(payloadByteCountTop, DEC);
@@ -423,8 +498,8 @@ void loop(){
         }
         Serial.println((((currentTime+currentBootTime)/1000/60)%60), DEC);
         #ifdef HTU21D
-          word humidity = payloadBytes[0] + payloadBytes[1]*256;
-          word temperature = payloadBytes[2] + payloadBytes[3]*256;
+          humidity = payloadBytes[0] + payloadBytes[1]*256;
+          temperature = payloadBytes[2] + payloadBytes[3]*256;
           Serial.print("Humidity Value [%RH]: ");
           Serial.println(((float)(-6.0) + (float)(125.0) * ((float)(humidity) / (float)(65536))), 2);
           Serial.print("Internal Temp [F]: ");
@@ -643,83 +718,5 @@ void getUserInput(){
       Serial.print("I received the milliseconds: ");
       Serial.println(currentTime, DEC);
     }
-  }
-}
-
-/*********************************/
-/********* nRf Functions *********/
-/*********************************/
-void clear_fifos(){
-  // Clear Rx FIFOs
-  digitalWrite(NRFCSn, LOW);
-  SPI.transfer(FLUSH_RX);
-  digitalWrite(NRFCSn, HIGH);
-  // Clear Tx FIFOs
-  digitalWrite(NRFCSn, LOW);
-  SPI.transfer(FLUSH_TX);
-  digitalWrite(NRFCSn, HIGH);
-}
-
-void clear_flags(){
-  // Clear STATUS Flags
-  digitalWrite(NRFCSn, LOW);
-  SPI.transfer(STATUS+W_REGISTER);
-  SPI.transfer(0x70);
-  digitalWrite(NRFCSn, HIGH);
-}
-
-void power_down(){
-  // Disable Chip Enable (Kills Rx Mode, mostly)
-  digitalWrite(NRFCE, LOW);
-  sleep(5);
-  // Power Down
-  digitalWrite(NRFCSn, LOW);
-  SPI.transfer(CONFIG+W_REGISTER);  // Write Reg (001x_xxxx)
-  SPI.transfer(0x00);               // Power Down
-  digitalWrite(NRFCSn, HIGH);
-}
-
-void power_up_rx(){
-  digitalWrite(NRFCSn, LOW);
-  SPI.transfer(CONFIG+W_REGISTER);  // Write Reg (001x_xxxx)
-  SPI.transfer(0x0B);               // CRC Enabled, Powerup Enabled, PRIM_RX Hi
-  digitalWrite(NRFCSn, HIGH);
-}
-
-void power_up_tx(){
-  digitalWrite(NRFCSn, LOW);
-  SPI.transfer(CONFIG+W_REGISTER);  // Write Reg (001x_xxxx)
-  SPI.transfer(0x0A);               // CRC Enabled, Powerup Enabled, PRIM_RX Lo
-  digitalWrite(NRFCSn, HIGH);
-}
-
-char get_status(){
-  char temp;
-  digitalWrite(NRFCSn, LOW);
-  SPI.transfer(STATUS);
-  temp = SPI.transfer(NOP);
-  digitalWrite(NRFCSn, HIGH);
-  return temp;
-}
-
-char get_top_rx_fifo_count(){
-  char temp;
-  digitalWrite(NRFCSn, LOW);
-  SPI.transfer(R_RX_PL_WID);
-  temp = SPI.transfer(NOP);
-  digitalWrite(NRFCSn, HIGH);
-  return temp;
-}
-
-bool get_carrier_detect_flag(){
-  char temp;
-  digitalWrite(NRFCSn, LOW);
-  SPI.transfer(CARRIERDETECT);
-  temp = SPI.transfer(NOP);
-  digitalWrite(NRFCSn, HIGH);
-  if(temp == 0x0){
-    return false;
-  }else{
-    return true;
   }
 }
