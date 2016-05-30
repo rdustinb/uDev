@@ -371,13 +371,16 @@ void loop(){
       // Setup Rx, CE set HI until data received
       digitalWrite(NRFCE, HIGH);
       #ifdef STATEDECODE
-      Serial.println("Consumer Loop >> SETUPRX going to RXDATA");
+      Serial.println("Consumer Loop >> SETUPRX going to WAITFORRX");
       #endif
       state = WAITFORRX;
       break;
     case WAITFORRX:
       if(nrfResults == 1){
         nrfResults = 0;
+        #ifdef STATEDECODE
+        Serial.println("Consumer Loop >> WAITFORRX going to RXDATA");
+        #endif
         state = RXDATA;
       }
       break;
