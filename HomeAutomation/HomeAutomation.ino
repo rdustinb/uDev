@@ -1,5 +1,9 @@
 // For the Consumer/Master, otherwise comment out
 #define CONSUMER
+//#define PRODUCER0
+
+// We're using the higher-precision HTU21D
+#define HTU21D
 
 // Used for debugging
 //#define STATEDECODE
@@ -50,7 +54,7 @@
 #define DYNPLD              0x1C
 #define FEATURE             0x1D
 
-
+// Consumer Globals
 #ifdef CONSUMER
   #include <avr/io.h>
   #include <avr/interrupt.h>
@@ -59,26 +63,33 @@
   #define NRFCSn      10
   #define NRFIRQn     6
   #define NRFCE       4
-  int newAddress[5] = {0x01,0x23,0x45,0x67,0x89};
+  int newAddress[3][5] = {
+    {0x01,0x23,0x45,0x67,0x89},
+    {0x01,0x23,0x45,0x67,0x8a},
+    {0x01,0x23,0x45,0x67,0x8b}
+  };
   enum consumerStates {IDLE,CDSETUP,CARRIERCHECK,DELAYTOTX,TXCOMMAND,
     WAITFORSTATUS,DECODESTATUS,SETUPRX,RXDATA,CARRIERFAILURE,RETRYFAILURE};
   consumerStates state = IDLE;
-  unsigned long enterTxMillis;
-  unsigned int retryCount;
-  char resultStatus = 0x20;
+  volatile unsigned long enterTxMillis;
+  volatile unsigned int retryCount;
+  volatile char resultStatus = 0x20;
   #define TXFAILUREDELAY 100
   #define DELAYTXMILLIS 20
 
-  char timeChar = 0;
-  unsigned long currentTime = 0;
-  unsigned long currentBootTime = 0;
+  volatile char timeChar = 0;
+  volatile unsigned long currentTime = 0;
+  volatile unsigned long currentBootTime = 0;
+
+  volatile unsigned long totalHandshakes;
+  volatile unsigned long failedHandshakes;
 
   /*********************************/
   /********* Req Timer ISR *********/
   /*********************************/
   #include "Timer.h"
   // Request Data Time Delay in miliseconds
-  #define REQTIMERMILIS 180000
+  #define REQTIMERMILIS 60000
   Timer reqTimer;
   volatile unsigned int timerExpired = 0;
   void timerISR(){
@@ -86,14 +97,23 @@
   }
 #else
   // All Other Devices
-  #include <dht11.h>
+  #ifdef HTU21D
+    #include <Wire.h>
+    word humidity;
+    word temperature;
+  #else
+    #include <dht11.h>
+    #define DHT11PIN    2
+    byte humidity;
+    byte temperature;
+  #endif
+
   #define NRFCSn      10
   #define NRFIRQn     3
   #define NRFCE       4
-  #define DHT11PIN    2
-  int newAddress[5] = {0x01,0x23,0x45,0x67,0x89};
-  byte humidity;
-  byte temperature;
+  volatile int newAddress[5] = {0x01,0x23,0x45,0x67,0x89};
+  volatile int addressSet = 0;
+  #endif
   enum producerStates {IDLE,RXCOMMAND,SAMPLEDATA,CDSETUP,CARRIERCHECK,DELAYTOTX,
     TXDATA,WAITFORSTATUS,DECODESTATUS,CARRIERFAILURE,RETRYFAILURE};
   producerStates state = IDLE;
@@ -130,7 +150,7 @@ void nrfSetup(){
   // Change to 1Mbps
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(RF_SETUP+W_REGISTER);
-  SPI.transfer(0x3);
+  SPI.transfer(0x7); // 0dB, LNA Gain, 1Mbps
   digitalWrite(NRFCSn, HIGH);
   // Change to 750us Retry Delay
   digitalWrite(NRFCSn, LOW);
@@ -167,6 +187,7 @@ void nrfSetup(){
   //SPI.transfer(ACTIVATE);
   //SPI.transfer(0x73); // Magic Value for Deactivate
   //digitalWrite(NRFCSn, HIGH);
+  #ifdef CONSUMER
   // Set Tx Address
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(TX_ADDR+W_REGISTER); // Write Reg (001x_xxxx)
@@ -181,6 +202,7 @@ void nrfSetup(){
     SPI.transfer(newAddress[i]);
   }
   digitalWrite(NRFCSn, HIGH);
+  #endif
   // Clear STATUS Flags
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(STATUS+W_REGISTER);
@@ -204,6 +226,13 @@ void nrfSetup(){
 void setup(){
   // Setup Serial Monitor
   Serial.begin(115200);
+  #ifdef CONSUMER
+    totalHandshakes = 0;
+    failedHandshakes = 0;
+    #ifdef HTU21D
+      Wire.begin();
+    #endif
+  #endif
   // Setup the nRF Pins
   pinMode(NRFCSn, OUTPUT);
   pinMode(NRFIRQn, INPUT_PULLUP);
@@ -495,8 +524,7 @@ void loop(){
         // Write Data to the Payload FIFO
         digitalWrite(NRFCSn, LOW);
         SPI.transfer(W_TX_PAYLOAD); // Write Reg (001x_xxxx)
-        SPI.transfer(0xde);         // "Command" Word
-        SPI.transfer(0xad);
+        SPI.transfer(0x10);         // "Command" Word (Request Sample)
         SPI.transfer(((currentTime+currentBootTime) >>  0) & 0xff);
         SPI.transfer(((currentTime+currentBootTime) >>  8) & 0xff);
         SPI.transfer(((currentTime+currentBootTime) >> 16) & 0xff);
@@ -509,6 +537,7 @@ void loop(){
         #ifdef STATEDECODE
         Serial.println("Consumer Loop >> TXCOMMAND going to WAITFORSTATUS");
         #endif
+        totalHandshakes++;
         state = WAITFORSTATUS;
         break;
       case WAITFORSTATUS:
@@ -546,12 +575,24 @@ void loop(){
             #ifdef STATEDECODE
             Serial.println("Consumer Loop >> sensor response hard failure. Stopping..."); 
             #endif
+            // Increment Failed Handshake Counter
+            failedHandshakes++;
+            // Power Down
+            digitalWrite(NRFCSn, LOW);
+            SPI.transfer(CONFIG+W_REGISTER); // Write Reg (001x_xxxx)
+            SPI.transfer(0x00);         // Power Down
+            digitalWrite(NRFCSn, HIGH);
             state = RETRYFAILURE;
           }else{
             retryCount += 1;
             #ifdef STATEDECODE
             Serial.println("Consumer Loop >> sensor response failed. Retrying...");
             #endif
+            // Power Down
+            digitalWrite(NRFCSn, LOW);
+            SPI.transfer(CONFIG+W_REGISTER); // Write Reg (001x_xxxx)
+            SPI.transfer(0x00);         // Power Down
+            digitalWrite(NRFCSn, HIGH);
             state = DELAYTOTX;
           }
         }
@@ -622,20 +663,36 @@ void loop(){
           // they are omitted in the DHT11 Library, 
           // returning only a single byte.
           #ifdef CONSUMERDATA
-          Serial.print("Time of last update [HH:MM]: ");
-          if(((currentTime+currentBootTime)/1000/60/60)%24 < 10){
-            Serial.print("0");
-          }
-          Serial.print(((currentTime+currentBootTime)/1000/60/60)%24, DEC);
-          Serial.print(":");
-          if((((currentTime+currentBootTime)/1000/60)%60) < 10){
-            Serial.print("0");
-          }
-          Serial.println((((currentTime+currentBootTime)/1000/60)%60), DEC);
-          Serial.print("Humidity (%): ");
-          Serial.println(payloadBytes[0]);
-          Serial.print("Temperature (F): ");
-          Serial.println((payloadBytes[1]*1.8 + 32));
+            Serial.println("--- Sensor Data ---");
+            Serial.print("Time of last update [HH:MM]: ");
+            if(((currentTime+currentBootTime)/1000/60/60)%24 < 10){
+              Serial.print("0");
+            }
+            Serial.print(((currentTime+currentBootTime)/1000/60/60)%24, DEC);
+            Serial.print(":");
+            if((((currentTime+currentBootTime)/1000/60)%60) < 10){
+              Serial.print("0");
+            }
+            Serial.println((((currentTime+currentBootTime)/1000/60)%60), DEC);
+            #ifdef HTU21D
+              word humidity = payloadBytes[0] + payloadBytes[1]*256;
+              word temperature = payloadBytes[2] + payloadBytes[3]*256;
+              Serial.print("Humidity Value [%RH]: ");
+              Serial.println(((float)(-6.0) + (float)(125.0) * ((float)(humidity) / (float)(65536))), 2);
+              Serial.print("Internal Temp [F]: ");
+              Serial.println((((float)(-46.85) + (float)(175.72) * ((float)(temperature) / (float)(65536)))*9/5 + 32), 2);
+            #else
+              Serial.print("Humidity (%): ");
+              Serial.println(payloadBytes[0]);
+              Serial.print("Temperature (F): ");
+              Serial.println((payloadBytes[1]*1.8 + 32));
+            #endif
+            Serial.println("--- Comm Stats ---");
+            Serial.print("Total Comms: ");
+            Serial.println(totalHandshakes, DEC);
+            Serial.print("Failed Comms: ");
+            Serial.println(failedHandshakes, DEC);
+            Serial.println(" ");
           #endif
           // Read Rx FIFO Status until Empty
           digitalWrite(NRFCSn, LOW);
@@ -661,6 +718,11 @@ void loop(){
           // Clear Tx FIFOs
           digitalWrite(NRFCSn, LOW);
           SPI.transfer(FLUSH_TX);
+          digitalWrite(NRFCSn, HIGH);
+          // Power Down
+          digitalWrite(NRFCSn, LOW);
+          SPI.transfer(CONFIG+W_REGISTER); // Write Reg (001x_xxxx)
+          SPI.transfer(0x00);         // Power Down
           digitalWrite(NRFCSn, HIGH);
           // Clear the Retry Counter for Later
           retryCount = 0;
@@ -703,21 +765,51 @@ void loop(){
   #else
     // Loop Variables
     char cdReg = 0x1;
+    char rdCnt = 0;
 
     // Loop Decode
     switch(state){
-      case IDLE:
-        digitalWrite(NRFCE, LOW);
+      case CHANGEADDRESS:
+        // Power Down
         digitalWrite(NRFCSn, LOW);
         SPI.transfer(CONFIG+W_REGISTER); // Write Reg (001x_xxxx)
-        SPI.transfer(0x0B);         // CRC Enabled, Powerup Enabled, PRIM_RX Hi
+        SPI.transfer(0x00);         // Power Down
         digitalWrite(NRFCSn, HIGH);
-        // Wait for 1.5ms after Power Up Command
+        // Wait for 1.5ms after Power Down Command
         delay(2);
-        // Setup Rx, CE set HI until data received
-        digitalWrite(NRFCE, HIGH);
-        Serial.println("Producer Loop >> IDLE going to RXCOMMAND");
-        state = RXCOMMAND;
+        // Set Tx Address
+        digitalWrite(NRFCSn, LOW);
+        SPI.transfer(TX_ADDR+W_REGISTER); // Write Reg (001x_xxxx)
+        for(int i=0; i<5; i++){
+          SPI.transfer(newAddress[i]);
+        }
+        digitalWrite(NRFCSn, HIGH);
+        // Set Rx0 Address
+        digitalWrite(NRFCSn, LOW);
+        SPI.transfer(RX_ADDR_P0+W_REGISTER); // Write Reg (001x_xxxx)
+        for(int i=0; i<5; i++){
+          SPI.transfer(newAddress[i]);
+        }
+        digitalWrite(NRFCSn, HIGH);
+        addressSet = 1;
+        state = IDLE;
+        break;
+      case IDLE:
+        if(addressSet == 1){
+          digitalWrite(NRFCE, LOW);
+          digitalWrite(NRFCSn, LOW);
+          SPI.transfer(CONFIG+W_REGISTER); // Write Reg (001x_xxxx)
+          SPI.transfer(0x0B);         // CRC Enabled, Powerup Enabled, PRIM_RX Hi
+          digitalWrite(NRFCSn, HIGH);
+          // Wait for 1.5ms after Power Up Command
+          delay(2);
+          // Setup Rx, CE set HI until data received
+          digitalWrite(NRFCE, HIGH);
+          Serial.println("Producer Loop >> IDLE going to RXCOMMAND");
+          state = RXCOMMAND;
+        }else{
+          state = DELAYTOTX;
+        }
         break;
       case RXCOMMAND:
         if(nrfResults == 1){
@@ -741,6 +833,20 @@ void loop(){
           /***********************/
           //  Authenticate Here
           /***********************/
+          switch(payloadBytes0[0]){
+            case 0x10 :
+              Serial.println("Producer Loop >> RXCOMMAND going to SAMPLEDATA");
+              state = SAMPLEDATA;
+              break;
+            case 0x11 :
+              Serial.println("Producer Loop >> RXCOMMAND received new address");
+              Serial.println("Producer Loop >> RXCOMMAND going to IDLE");
+              for(int i=1; i<6; i++){
+                newAddress[(i-1)] = payloadBytes0[i];
+              }
+              state = CHANGEADDRESS;
+              break;
+          }
           // Read Rx FIFO Status until Empty
           digitalWrite(NRFCSn, LOW);
           SPI.transfer(FIFO_STATUS+R_REGISTER);
@@ -772,23 +878,73 @@ void loop(){
           digitalWrite(NRFCSn, HIGH);
           // Clear the Retry Counter for Later
           retryCount = 0;
-          Serial.println("Producer Loop >> RXCOMMAND going to SAMPLEDATA");
-          state = SAMPLEDATA;
         }
         break;
       case SAMPLEDATA:
-        static Dht11 sensor(DHT11PIN);
-        if(nrfResults == 1){
-          nrfResults = 0;
-        }
-        switch (sensor.read()) {
-          case Dht11::OK:
-            humidity = sensor.getHumidity();
-            temperature = sensor.getTemperature();
-            break;
-          default:
-            break;
-        }
+        #ifdef HTU21D
+          // Get Humidity Data
+          Wire.beginTransmission(0x40);
+          Wire.write(0xE5);
+          Wire.endTransmission(0);
+          Wire.requestFrom(0x40, 3);
+          while(3 > Wire.available());
+          while(Wire.available()){
+            if(1 == rdCnt){
+              humidity = (word)(humidity * 256) + (word)(Wire.read());
+            }else if(0 == rdCnt){
+              humidity = (word)(Wire.read());
+            }else{
+              int checksum = (int)(Wire.read());
+            }
+            rdCnt++;
+          }
+          rdCnt = 0;
+          // Final Cleanup
+          if((temperature & 0x3) == 0x2){
+            // Upper 12-bits is the actual humidity
+            humidity = (word)(humidity & 0xFFF0);
+          }else{
+              Serial.println("Warning > Invalid humidity sample.");
+          }
+
+          // Get Temperature Data
+          Wire.beginTransmission(0x40);
+          Wire.write(0xE3);
+          Wire.endTransmission(0);
+          Wire.requestFrom(0x40, 3);
+          while(3 > Wire.available());
+          while(Wire.available()){
+            if(1 == rdCnt){
+              temperature = (word)(temperature * 256) + (word)(Wire.read());
+            }else if(0 == rdCnt){
+              temperature = (word)(Wire.read());
+            }else{
+              int checksum = (int)(Wire.read());
+            }
+            rdCnt++;
+          }
+          // Final Cleanup
+          if((temperature & 0x3) == 0x0){
+            // Upper 12-bits is the actual temperature
+            temperature = (word)(temperature & 0xFFFC);
+          }else{
+            Serial.println("Warning > Invalid temperature sample.");
+          }
+          rdCnt = 0;
+        #else
+          static Dht11 sensor(DHT11PIN);
+          if(nrfResults == 1){
+            nrfResults = 0;
+          }
+          switch (sensor.read()) {
+            case Dht11::OK:
+              humidity = sensor.getHumidity();
+              temperature = sensor.getTemperature();
+              break;
+            default:
+              break;
+          }
+        #endif
         Serial.println("Producer Loop >> SAMPLEDATA going to DELAYTOTX");
         state = DELAYTOTX;
         break;
@@ -860,22 +1016,46 @@ void loop(){
         digitalWrite(NRFCSn, LOW);
         SPI.transfer(FLUSH_TX);
         digitalWrite(NRFCSn, HIGH);
-        // Print out sampled data
-        Serial.print("Humidity (%): ");
-        Serial.println(humidity);
-        Serial.print("Temperature (F): ");
-        Serial.println((temperature*1.8 + 32));
+        if(addressSet == 1){
+          // Print out sampled data
+          #ifdef HTU21D
+            Serial.print("Humidity Value [%RH]: ");
+            Serial.println(((float)(-6.0) + (float)(125.0) * ((float)(humidity) / (float)(65536))), 2);
+            Serial.print("Internal Temp [C]: ");
+            Serial.println(((float)(-46.85) + (float)(175.72) * ((float)(temperature) / (float)(65536))), 2);
+          #else
+            Serial.print("Humidity (%): ");
+            Serial.println(humidity);
+            Serial.print("Temperature (F): ");
+            Serial.println((temperature*1.8 + 32));
+          #endif
+        }
         // Update Current Timestamp
-        currentTime = millis();
+        currentBootTime = millis();
         // Write Data to the Payload FIFO
         digitalWrite(NRFCSn, LOW);
         SPI.transfer(W_TX_PAYLOAD); // Write Reg (001x_xxxx)
-        SPI.transfer(humidity);
-        SPI.transfer(temperature);
-        SPI.transfer((currentTime >>  0) & 0xff);
-        SPI.transfer((currentTime >>  8) & 0xff);
-        SPI.transfer((currentTime >> 16) & 0xff);
-        SPI.transfer((currentTime >> 24) & 0xff);
+        if(addressSet == 1){
+          #ifdef HTU21D
+            // The HTU21D has 12-bits for Humidity (word type) and 14-bits for the
+            // temperature (word type)
+            SPI.transfer((char)(humidity&0xFF));
+            SPI.transfer((char)((humidity&0xFF00)>>8));
+            SPI.transfer((char)(temperature&0xFF));
+            SPI.transfer((char)((temperature&0xFF00)>>8));
+          #else
+            // The DHT11 only has one byte per value (char type)
+            SPI.transfer(humidity);
+            SPI.transfer(temperature);
+          #endif
+          SPI.transfer((currentBootTime >>  0) & 0xff);
+          SPI.transfer((currentBootTime >>  8) & 0xff);
+          SPI.transfer((currentBootTime >> 16) & 0xff);
+          SPI.transfer((currentBootTime >> 24) & 0xff);
+        }else{
+          // Request new address command
+          SPI.transfer(0x11);
+        }
         digitalWrite(NRFCSn, HIGH);
         // Set CE Hi (>10us) to Enable Tx
         digitalWrite(NRFCE, HIGH);
@@ -919,16 +1099,25 @@ void loop(){
             state = RETRYFAILURE;
           }else{
             retryCount += 1;
-            Serial.println("Producer Loop >> Tx sensor data failed. Retrying...");
+            if(addressSet == 1){
+              Serial.println("Producer Loop >> Tx sensor data failed. Retrying...");
+            }else{
+              Serial.println("Producer Loop >> Address request failed. Retrying...");
+            }
             state = CDSETUP;
           }
         }
         // Tx Succeeded
         if((resultStatus & 0x20) == 0x20){
           retryCount = 0;
-          Serial.println("Producer Loop >> DECODESTATUS going to IDLE");
-          Serial.println(" ");
-          state = IDLE;
+          if(addressSet == 1){
+            Serial.println("Producer Loop >> DECODESTATUS going to IDLE");
+            Serial.println(" ");
+            state = IDLE;
+          }else{
+            Serial.println("Producer Loop >> DECODESTATUS going to RXADDRESS");
+            state = RXADDRESS;
+          }
         }
         // Rx Data Present
         if((resultStatus & 0x40) == 0x40){
@@ -936,6 +1125,18 @@ void loop(){
           Serial.println("Producer Loop >> I'm trying to Tx my sensor data!");
         }
         break;
+      case RXADDRESS:
+        digitalWrite(NRFCE, LOW);
+        digitalWrite(NRFCSn, LOW);
+        SPI.transfer(CONFIG+W_REGISTER); // Write Reg (001x_xxxx)
+        SPI.transfer(0x0B);         // CRC Enabled, Powerup Enabled, PRIM_RX Hi
+        digitalWrite(NRFCSn, HIGH);
+        // Wait for 1.5ms after Power Up Command
+        delay(2);
+        // Setup Rx, CE set HI until data received
+        digitalWrite(NRFCE, HIGH);
+        Serial.println("Producer Loop >> RXADDRESS going to RXCOMMAND");
+        state = RXCOMMAND;
       case CARRIERFAILURE:
         // Dead State, the Carrier detection state failed hard, never
         // allowing this device to Tx sensor data
