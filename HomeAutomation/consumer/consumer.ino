@@ -713,10 +713,26 @@ void getUserInput(){
           timeChar = 0;
         }
         break;
-    }
-    if(timeChar == 0){
-      Serial.print("I received the milliseconds: ");
-      Serial.println(currentTime, DEC);
+      case 67 :             // "C"
+        Serial.println("Cleared stats!");
+        totalHandshakes = 0;
+        failedHandshakes = 0;
+        break;
+      case 99 :             // "c"
+        Serial.println("Cleared stats!");
+        totalHandshakes = 0;
+        failedHandshakes = 0;
+        break;
+      case 84 :             // "T"
+        Serial.println("Cleared time entry!");
+        currentTime = 0;
+        timeChar = 0;
+        break;
+      case 116 :             // "t"
+        Serial.println("Cleared time entry!");
+        currentTime = 0;
+        timeChar = 0;
+        break;
     }
   }
 }
