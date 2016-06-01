@@ -60,8 +60,8 @@
 #define NRFCE       4
 int newAddress[5] = {0x01,0x23,0x45,0x67,0x89};
 enum consumerStates {IDLE,CDSETUP,CARRIERCHECK,DELAYTOTX,TXCOMMAND,WAITFORSTATUS,
-  DECODESTATUS,SETUPRX,WAITFORRX,RXDATA,CARRIERFAILURE,RETRYFAILURE};
-consumerStates state = IDLE;
+  DECODESTATUS,SETUPRX,WAITFORRX,RXDATA,CARRIERFAILURE,RETRYFAILURE,TRANSIDLE};
+consumerStates state = TRANSIDLE;
 volatile unsigned long enterTxMillis;
 volatile unsigned int retryCount;
 volatile char resultStatus = 0x20;
@@ -106,6 +106,8 @@ void power_down(){
   SPI.transfer(CONFIG+W_REGISTER);  // Write Reg (001x_xxxx)
   SPI.transfer(0x00);               // Power Down
   digitalWrite(NRFCSn, HIGH);
+  // Wait 1.5ms to allow power down to occur
+  delay(2);
 }
 
 void power_up_rx(){
@@ -380,7 +382,6 @@ void loop(){
       #ifdef STATEDECODE
       Serial.println("Consumer Loop >> TXCOMMAND going to WAITFORSTATUS");
       #endif
-      totalHandshakes++;
       state = WAITFORSTATUS;
       break;
     case WAITFORSTATUS:
@@ -424,6 +425,7 @@ void loop(){
       // Tx of Command Succeeded
       if((resultStatus & 0x20) == 0x20){
         retryCount = 0;
+        totalHandshakes++;
         #ifdef STATEDECODE
         Serial.println("Consumer Loop >> DECODESTATUS going to SETUPRX");
         #endif
@@ -524,10 +526,10 @@ void loop(){
       // Clear the Retry Counter for Later
       retryCount = 0;
       #ifdef STATEDECODE
-      Serial.println("Consumer Loop >> RXDATA going to IDLE");
+      Serial.println("Consumer Loop >> RXDATA going to TRANSIDLE");
       Serial.println(" ");
       #endif
-      state = IDLE;
+      state = TRANSIDLE;
       break;
     case CARRIERFAILURE:
       // Dead State, the Carrier detection state failed hard, never
@@ -536,7 +538,7 @@ void loop(){
       Serial.println("Consumer Loop >> recovering from carrier failure...");
       Serial.println(" ");
       #endif
-      state = IDLE;
+      state = TRANSIDLE;
       break;
     case RETRYFAILURE:
       // Dead State, the Retry of Sensor Data attempts exceeded the allowed
@@ -545,6 +547,12 @@ void loop(){
       Serial.println("Consumer Loop >> recovering from sensor response failure...");
       Serial.println(" ");
       #endif
+      state = TRANSIDLE;
+      break;
+    case TRANSIDLE:
+      // In IDLE, we're in Rx mode to allow for async requests from the producers
+      // for addresses or other services
+      power_up_rx();
       state = IDLE;
       break;
     default:
@@ -553,7 +561,7 @@ void loop(){
       nrfResults = 0;
       enterTxMillis = millis();
       power_down();
-      state = IDLE;
+      state = TRANSIDLE;
       break;
   }
 }
