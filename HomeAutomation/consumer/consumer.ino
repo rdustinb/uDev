@@ -1,13 +1,34 @@
-// We're using the higher-precision HTU21D
-#define HTU21D
-
 // Used for debugging
 //#define STATEDECODE
 //#define DATAFLOW
 #define CONSUMERDATA
+//#define FUNCALLS
 
-// Needed for SPI Communications to nRF
+// Teensy 3.1, Polling All Other Devices
+#define NRFCSn      10
+#define NRFIRQn     6
+#define NRFCE       4
+#define AIN         23
+
+// Libraries Needed
 #include <SPI.h>
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include "Timer.h"
+
+// Address Registration Parameters
+#define ADDRESSCOUNT 32
+
+// Handshaking Time Values
+#define TXFAILUREDELAY 100
+#define RSPFAILUREDELAY 100
+#define FAILUREDELAY 1000
+#define DELAYTXMILLIS 20
+#define REQTIMERMILIS 60000
+
+// Control Words
+#define REQADDR             0xF0
+#define REQSENSOR           0xFE
 
 // nRF Command Set
 #define R_REGISTER          0x00 // 0x00 - 0x1C
@@ -22,6 +43,7 @@
 #define W_ACK_PAYLOAD       0xA8 // 0xA8 - 0xAF
 #define W_TX_PAYLOAD_NOACK  0xB0
 #define NOP                 0xFF
+
 // nRF Register Space
 #define CONFIG              0x00
 #define EN_AA               0x01
@@ -50,35 +72,388 @@
 #define DYNPLD              0x1C
 #define FEATURE             0x1D
 
-// Consumer Globals
-#include <avr/io.h>
-#include <avr/interrupt.h>
+// Advanced Types
+enum States {IDLE,RXTOTX_RXCOMMAND,RXTOTX_DELAYTOTX,RXTOTX_TXRESPONSE,
+  RXTOTX_DELAYSTATUS,RXTOTX_DECODESTATUS,RXTOTX_TXFAILURE,TXTORX_DELAYTOTX,
+  TXTORX_TXCOMMAND,TXTORX_DELAYSTATUS,TXTORX_DECODESTATUS,TXTORX_SETUPRX,
+  TXTORX_DELAYRX,TXTORX_RXRESPONSE,TXTORX_TXFAILURE,DEAD} state;
+Timer reqTimer;
 
-// Teensy 3.1, Polling All Other Devices
-#define NRFCSn      10
-#define NRFIRQn     6
-#define NRFCE       4
-int newAddress[5] = {0x01,0x23,0x45,0x67,0x89};
-enum consumerStates {IDLE,CDSETUP,CARRIERCHECK,DELAYTOTX,TXCOMMAND,WAITFORSTATUS,
-  DECODESTATUS,SETUPRX,WAITFORRX,RXDATA,CARRIERFAILURE,RETRYFAILURE,TRANSIDLE};
-consumerStates state = TRANSIDLE;
+// Globals
+uint8_t defaultAddress[5] = {0x01,0x23,0x45,0x67,0x89};
+uint8_t* p_defaultAddress = defaultAddress;
 volatile unsigned long enterTxMillis;
-volatile unsigned int retryCount;
-volatile char resultStatus = 0x20;
-#define TXFAILUREDELAY 100
-#define DELAYTXMILLIS 20
+volatile char timeChar;
+volatile unsigned long currentTime;
+volatile unsigned long currentBootTime;
+volatile unsigned int totalHandshakes;
+volatile unsigned int failedHandshakes;
+volatile unsigned int timerExpired;
+volatile unsigned int nrfResults;
+// Main Address Registration
+// How to make this dynamically adjustable?
+struct Producers {
+  uint8_t address[ADDRESSCOUNT][5];
+  uint8_t* p_address[ADDRESSCOUNT];
+  uint8_t registered_count;
+  uint8_t service_count;
+} producer_list;
 
-volatile char timeChar = 0;
-volatile unsigned long currentTime = 0;
-volatile unsigned long currentBootTime = 0;
+/*********************************/
+/********* Req Timer ISR *********/
+/*********************************/
+void timerISR(){
+  cli();
+  #ifdef STATEDECODE
+  Serial.println(F("timerISR: timer expired!"));
+  #endif
+  timerExpired = 1;
+  sei();
+}
 
-volatile unsigned long totalHandshakes;
-volatile unsigned long failedHandshakes;
+/*********************************/
+/******** nRF Result ISR *********/
+/*********************************/
+void nrfISR(){
+  cli();
+  #ifdef STATEDECODE
+  Serial.println(F("nrfISR: interrupt seen!"));
+  #endif
+  nrfResults = 1;
+  sei();
+}
+
+/*********************************/
+/********** Main Setup ***********/
+/*********************************/
+void setup(){
+  // Setup Serial Monitor
+  Serial.begin(115200);
+  // Clear Globals
+  timeChar = 0;
+  currentTime = 0;
+  currentBootTime = 0;
+  totalHandshakes = 0;
+  failedHandshakes = 0;
+  timerExpired = 0;
+  nrfResults = 0;
+  state = IDLE;
+  // Setup the nRF Pins
+  pinMode(NRFCSn, OUTPUT);
+  pinMode(NRFIRQn, INPUT_PULLUP);
+  pinMode(NRFCE, OUTPUT);
+  // Begin SPI for the nRF Device
+  SPI.begin();
+  // Setup the nRF Device Configuration
+  nrfSetup();
+  Serial.println(F("nRF Setup Complete!"));
+  // Setup the request timer
+  reqTimer.every(REQTIMERMILIS, timerISR);
+  // Setup the Interrupt Pin, parameterized
+  attachInterrupt(NRFIRQn, nrfISR, FALLING);
+  // Initialize the Address List Pointers
+  for(int i=0; i<ADDRESSCOUNT; i++){
+    producer_list.p_address[i] = &producer_list.address[i][0];
+  }
+  producer_list.registered_count = 0;
+  producer_list.service_count = 0;
+  // Always Power up in Rx Mode
+  power_up_rx();
+
+  Serial.println(F("Core Setup Complete!"));
+}
+
+/*********************************/
+/*********** Main Loop ***********/
+/*********************************/
+void loop(){
+  // Loop Variables
+  int status;
+
+  // This "updates" the timer, kind of lame but apparently it works
+  // may need to factor in variance when other code is running.
+  reqTimer.update();
+
+  // Service User Input
+  getUserInput();
+
+  switch(state){
+    case IDLE:
+      if(nrfResults == 1){
+        // Data Received asynchronously on generic address port
+        nrfResults = 0;
+        #ifdef STATEDECODE
+        Serial.println(F("IDLE->RXTOTX_RXCOMMAND"));
+        #endif
+        state = RXTOTX_RXCOMMAND;
+      }else if(timerExpired == 1){
+        // Round Robin Timer Expired, sample all registered producers
+        timerExpired = 0;
+        // Only start sampling if we have at least one registered producer
+        if(producer_list.registered_count != 0){
+          // Snapshot Current time value
+          enterTxMillis = millis();
+          #ifdef STATEDECODE
+          Serial.println(F("IDLE->TXTORX_DELAYTOTX"));
+          #endif
+          totalHandshakes++;
+          state = TXTORX_DELAYTOTX;
+        }
+      }
+      break;
+    /******************************************
+          Receive First then Transmit Flow
+    ******************************************/
+    case RXTOTX_RXCOMMAND:
+      // Check the status
+      status = decode_status();
+      if(status == 1){
+        // Determine what needs to happen
+        decode_rx_fifo();
+      }else{
+        #ifdef STATEDECODE
+        Serial.println(F("nRf comm failure, no Rx response received.")); 
+        #endif
+      }
+      // Clear FIFOs
+      clear_fifos();
+      // Clear Flags
+      clear_flags();
+      // Power Down the Transceiver
+      power_down();
+      #ifdef STATEDECODE
+      Serial.println(F("RXTOTX_RXCOMMAND->RXTOTX_DELAYTOTX")); 
+      #endif
+      state = RXTOTX_DELAYTOTX;
+      break;
+    case RXTOTX_DELAYTOTX:
+      // Standard Delay (Functionalize this?)
+      if((millis() - enterTxMillis) >= DELAYTXMILLIS){
+        #ifdef STATEDECODE
+        Serial.println(F("RXTOTX_DELAYTOTX->RXTOTX_TXRESPONSE"));
+        #endif
+        state = RXTOTX_TXRESPONSE;
+      }
+      break;
+    case RXTOTX_TXRESPONSE:
+      // Power Up in Tx
+      power_up_tx();
+      // Clear FIFOs
+      clear_fifos();
+      // Clear Flags
+      clear_flags();
+      // The producer needs an address for communicating with the consumer and
+      // the consumer needs to know to request data from that particular
+      // producer. Generate a random address and increment the registered 
+      // producer pointer.
+      register_producer();
+      // Get the current Milisecond time to allow for a maximum wait time
+      enterTxMillis = millis();
+      #ifdef STATEDECODE
+      Serial.println(F("RXTOTX_TXRESPONSE->RXTOTX_DELAYSTATUS"));
+      #endif
+      state = RXTOTX_DELAYSTATUS;
+      break;
+    case RXTOTX_DELAYSTATUS:
+      if(nrfResults == 1){
+        nrfResults = 0;
+        #ifdef STATEDECODE
+        Serial.println(F("RXTOTX_DELAYSTATUS->RXTOTX_DECODESTATUS"));
+        #endif
+        state = RXTOTX_DECODESTATUS;
+      }else if(tx_timeout_reached(enterTxMillis)){
+        #ifdef STATEDECODE
+        Serial.println(F("RXTOTX_DELAYSTATUS->RXTOTX_TXFAILURE"));
+        #endif
+        Serial.println(F("Tx never received a result from the local nRf, failing."));
+        enterTxMillis = millis();
+        state = RXTOTX_TXFAILURE;
+      }
+      break;
+    case RXTOTX_DECODESTATUS:
+      // Check the status
+      status = decode_status();
+      // Clear FIFOs
+      clear_fifos();
+      // Power Down
+      power_down();
+      if(status == -1){
+        #ifdef STATEDECODE
+        Serial.println(F("Tx failed with nRf Max Retries, failing.")); 
+        Serial.println(F("RXTOTX_DECODESTATUS->RXTOTX_TXFAILURE")); 
+        #endif
+        enterTxMillis = millis();
+        // Clear FIFOs
+        clear_fifos();
+        // Clear Flags
+        clear_flags();
+        state = RXTOTX_TXFAILURE;
+      }else if(status == 0){
+        #ifdef STATEDECODE
+        Serial.println(F("RXTOTX_DECODESTATUS->IDLE")); 
+        #endif
+        // Increment the Registered Producer Count
+        producer_list.registered_count++;
+        state = IDLE;
+        //state = DEAD;
+      }
+      break;
+    case RXTOTX_TXFAILURE:
+      #ifdef STATEDECODE
+      Serial.println(F("RXTOTX_TXFAILURE->IDLE")); 
+      #endif
+      power_up_rx();
+      state = IDLE;
+      break;
+    /******************************************
+          Transmit First then Receive Flow
+    ******************************************/
+    case TXTORX_DELAYTOTX:
+      // Standard Delay (Functionalize this?)
+      if((millis() - enterTxMillis) >= DELAYTXMILLIS){
+        #ifdef STATEDECODE
+        Serial.println(F("TXTORX_DELAYTOTX->TXTORX_TXCOMMAND"));
+        #endif
+        state = TXTORX_TXCOMMAND;
+      }
+      break;
+    case TXTORX_TXCOMMAND:
+      // Switch Pipe to next device
+      set_addr_pipe(producer_list.p_address[producer_list.service_count],5);
+      // Power Up in Tx
+      power_up_tx();
+      // Clear FIFOs
+      clear_fifos();
+      #ifdef DATAFLOW
+      Serial.print(F("Requesting data!"));
+      get_addr_pipe();
+      #endif
+      // Request Sensor Data
+      request_sensor_data();
+      // Get the current Milisecond time to allow for a maximum wait time
+      enterTxMillis = millis();
+      #ifdef STATEDECODE
+      Serial.println(F("TXTORX_TXCOMMAND->TXTORX_DELAYSTATUS"));
+      #endif
+      state = TXTORX_DELAYSTATUS;
+      break;
+    case TXTORX_DELAYSTATUS:
+      if(nrfResults == 1){
+        nrfResults = 0;
+        #ifdef STATEDECODE
+        Serial.println(F("TXTORX_DELAYSTATUS->TXTORX_DECODESTATUS"));
+        #endif
+        state = TXTORX_DECODESTATUS;
+      }else if(tx_timeout_reached(enterTxMillis)){
+        #ifdef STATEDECODE
+        Serial.println(F("TXTORX_DELAYSTATUS->TXTORX_TXFAILURE"));
+        #endif
+        Serial.println(F("Tx never received a result from the local nRf, failing."));
+        enterTxMillis = millis();
+        state = TXTORX_TXFAILURE;
+      }
+      break;
+    case TXTORX_DECODESTATUS:
+      // Check the status
+      status = decode_status();
+      // Clear FIFOs
+      clear_fifos();
+      // Power Down
+      power_down();
+      if(status == -1){
+        #ifdef STATEDECODE
+        Serial.println(F("Tx failed with nRf Max Retries, failing.")); 
+        Serial.println(F("TXTORX_DECODESTATUS->TXTORX_TXFAILURE")); 
+        #endif
+        enterTxMillis = millis();
+        state = TXTORX_TXFAILURE;
+      }else if(status == 0){
+        #ifdef STATEDECODE
+        Serial.println(F("TXTORX_DECODESTATUS->TXTORX_SETUPRX")); 
+        #endif
+        state = TXTORX_SETUPRX;
+      }
+      break;
+    case TXTORX_SETUPRX:
+      // Power Rx
+      power_up_rx();
+      // Get the current Milisecond time to allow for a maximum wait time
+      enterTxMillis = millis();
+      #ifdef STATEDECODE
+      Serial.println(F("TXTORX_SETUPRX->TXTORX_DELAYRX"));
+      #endif
+      state = TXTORX_DELAYRX;
+      break;
+    case TXTORX_DELAYRX:
+      if(nrfResults == 1){
+        nrfResults = 0;
+        #ifdef STATEDECODE
+        Serial.println(F("TXTORX_DELAYRX->TXTORX_RXRESPONSE"));
+        #endif
+        state = TXTORX_RXRESPONSE;
+      }else if(rsp_timeout_reached(enterTxMillis)){
+        #ifdef STATEDECODE
+        Serial.println(F("TXTORX_DELAYRX->TXTORX_TXFAILURE"));
+        #endif
+        Serial.println(F("Maximum timeout for a response received, failing."));
+        enterTxMillis = millis();
+        state = TXTORX_TXFAILURE;
+      }
+      break;
+    case TXTORX_RXRESPONSE:
+      // Check the status
+      status = decode_status();
+      if(status == 1){
+        // Print Current Time
+        print_current_time(currentTime+millis());
+        // Print Stats
+        print_comm_stats(totalHandshakes, failedHandshakes);
+        // Simply Print the Rx FIFO Contents
+        decode_rx_fifo();
+      }else{
+        #ifdef STATEDECODE
+        Serial.println(F("nRf comm failure, no Rx response received.")); 
+        #endif
+      }
+      // Power Down for interface changes
+      power_down();
+      // Increment servicing counter to next device
+      producer_list.service_count++;
+      // Branch if there are more devices to sample
+      if(producer_list.service_count < producer_list.registered_count){
+        // Snapshot Current time value
+        enterTxMillis = millis();
+        #ifdef STATEDECODE
+        Serial.println(F("TXTORX_RXRESPONSE->TXTORX_DELAYTOTX")); 
+        #endif
+        state = TXTORX_DELAYTOTX;
+      }else{
+        // Clear servicing count
+        producer_list.service_count = 0;
+        // Set back to generic address pipe
+        set_addr_pipe(p_defaultAddress,5);
+        // When done servicing, return to Rx mode with generic address pipe
+        power_up_rx();
+        #ifdef STATEDECODE
+        Serial.println(F("TXTORX_RXRESPONSE->IDLE")); 
+        #endif
+        state = IDLE;
+      }
+      break;
+    case TXTORX_TXFAILURE:
+      failedHandshakes++;
+      state = IDLE;
+      break;
+  }
+}
 
 /*********************************/
 /********* nRf Functions *********/
 /*********************************/
 void clear_fifos(){
+  #ifdef FUNCALLS
+  Serial.println(F("clear_fifos()")); 
+  #endif
   // Clear Rx FIFOs
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(FLUSH_RX);
@@ -90,7 +465,9 @@ void clear_fifos(){
 }
 
 void clear_flags(){
-  // Clear STATUS Flags
+  #ifdef FUNCALLS
+  Serial.println(F("clear_flags()")); 
+  #endif
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(STATUS+W_REGISTER);
   SPI.transfer(0x70);
@@ -98,9 +475,12 @@ void clear_flags(){
 }
 
 void power_down(){
+  #ifdef FUNCALLS
+  Serial.println(F("power_down()")); 
+  #endif
   // Disable Chip Enable (Kills Rx Mode, mostly)
   digitalWrite(NRFCE, LOW);
-  delay(5);
+  delay(1);
   // Power Down
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(CONFIG+W_REGISTER);  // Write Reg (001x_xxxx)
@@ -111,21 +491,36 @@ void power_down(){
 }
 
 void power_up_rx(){
+  #ifdef FUNCALLS
+  Serial.println(F("power_up_rx()")); 
+  #endif
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(CONFIG+W_REGISTER);  // Write Reg (001x_xxxx)
   SPI.transfer(0x0B);               // CRC Enabled, Powerup Enabled, PRIM_RX Hi
   digitalWrite(NRFCSn, HIGH);
+  // Wait for 1.5ms after Power Up Command
+  delay(2);
+  // Setup Rx, CE set HI until data received
+  digitalWrite(NRFCE, HIGH);
 }
 
 void power_up_tx(){
+  #ifdef FUNCALLS
+  Serial.println(F("power_up_tx()")); 
+  #endif
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(CONFIG+W_REGISTER);  // Write Reg (001x_xxxx)
   SPI.transfer(0x0A);               // CRC Enabled, Powerup Enabled, PRIM_RX Lo
   digitalWrite(NRFCSn, HIGH);
+  // Wait for 1.5ms after Power Up Command
+  delay(2);
 }
 
-char get_status(){
-  char temp;
+uint8_t get_status(){
+  #ifdef FUNCALLS
+  Serial.println(F("get_status()")); 
+  #endif
+  uint8_t temp;
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(STATUS);
   temp = SPI.transfer(NOP);
@@ -133,8 +528,11 @@ char get_status(){
   return temp;
 }
 
-char get_top_rx_fifo_count(){
-  char temp;
+uint8_t get_top_rx_fifo_count(){
+  #ifdef FUNCALLS
+  Serial.println(F("get_top_rx_fifo_count()")); 
+  #endif
+  uint8_t temp;
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(R_RX_PL_WID);
   temp = SPI.transfer(NOP);
@@ -143,7 +541,10 @@ char get_top_rx_fifo_count(){
 }
 
 bool get_carrier_detect_flag(){
-  char temp;
+  #ifdef FUNCALLS
+  Serial.println(F("get_carrier_detect_flag()")); 
+  #endif
+  uint8_t temp;
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(CARRIERDETECT);
   temp = SPI.transfer(NOP);
@@ -153,31 +554,6 @@ bool get_carrier_detect_flag(){
   }else{
     return true;
   }
-}
-
-/*********************************/
-/********* Req Timer ISR *********/
-/*********************************/
-#include "Timer.h"
-// Request Data Time Delay in miliseconds
-#define REQTIMERMILIS 60000
-Timer reqTimer;
-volatile unsigned int timerExpired = 0;
-void timerISR(){
-  timerExpired = 1;
-}
-
-/*********************************/
-/******** nRF Result ISR *********/
-/*********************************/
-volatile unsigned int nrfResults = 0;
-void nrfISR(){
-  cli();
-  #ifdef STATEDECODE
-  Serial.println("nrfISR: interrupt seen!");
-  #endif
-  nrfResults = 1;
-  sei();
 }
 
 /*********************************/
@@ -193,26 +569,21 @@ void nrfSetup(){
   SPI.transfer(RF_SETUP+W_REGISTER);
   SPI.transfer(0x7); // 0dB, LNA Gain, 1Mbps
   digitalWrite(NRFCSn, HIGH);
-  // Change to 750us Retry Delay
+  // Change to 4000us Retry Delay
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(SETUP_RETR+W_REGISTER);
-  SPI.transfer(0x83);
+  SPI.transfer(0xF3);
   digitalWrite(NRFCSn, HIGH);
-  // Change to Channel 76
+  // Change to Channel 1
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(RF_CH+W_REGISTER);
-  SPI.transfer(0x4c);
+  SPI.transfer(0x1);
   digitalWrite(NRFCSn, HIGH);
   // Activate Extended Access
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(ACTIVATE);
   SPI.transfer(0x73); // Magic Value for Activate
   digitalWrite(NRFCSn, HIGH);
-  // Set the Rx Pipe to 32 Bytes (even though Dynamic is active)
-  //digitalWrite(NRFCSn, LOW);
-  //SPI.transfer(RX_PW_P0+W_REGISTER);
-  //SPI.transfer(0x2);
-  //digitalWrite(NRFCSn, HIGH);
   // Enable Dynamic Payload on Rx Pipe
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(DYNPLD+W_REGISTER);
@@ -223,264 +594,189 @@ void nrfSetup(){
   SPI.transfer(FEATURE+W_REGISTER);
   SPI.transfer(0x4); // Dynamic Payload Enable
   digitalWrite(NRFCSn, HIGH);
-  // Activate Extended Access
-  //digitalWrite(NRFCSn, LOW);
-  //SPI.transfer(ACTIVATE);
-  //SPI.transfer(0x73); // Magic Value for Deactivate
-  //digitalWrite(NRFCSn, HIGH);
+  // Setup Pipe
+  set_addr_pipe(p_defaultAddress,5);
+  // Clear STATUS Flags
+  clear_flags();
+  // Clear FIFOs
+  clear_fifos();
+}
+
+/*********************************/
+/****** Low Level Functions ******/
+/*********************************/
+void request_sensor_data(){
+  // Request Sensor Data
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(W_TX_PAYLOAD);
+  SPI.transfer(REQSENSOR);
+  digitalWrite(NRFCSn, HIGH);
+  // Set CE Hi (>10us) to Enable Tx
+  digitalWrite(NRFCE, HIGH);
+  delay(10);
+  digitalWrite(NRFCE, LOW);
+}
+
+bool tx_timeout_reached(unsigned long refMillis){
+  // Expecting a very fast response from the local nRf
+  if((millis()-refMillis) > TXFAILUREDELAY){
+    return true;
+  }else{
+    return false;
+  }
+}
+
+bool rsp_timeout_reached(unsigned long refMillis){
+  if((millis()-refMillis) > RSPFAILUREDELAY){
+    return true;
+  }else{
+    return false;
+  }
+}
+
+bool delay_after_failure(unsigned long refMillis){
+  if((millis()-refMillis) > FAILUREDELAY){
+    return true;
+  }else{
+    return false;
+  }
+}
+
+int decode_status(){
+  #ifdef FUNCALLS
+  Serial.println(F("decode_status()")); 
+  #endif
+  // Check Status Register for Results
+  uint8_t resultStatus = get_status();
+  // Clear STATUS Flags
+  clear_flags();
+  // Tx Failed
+  if((resultStatus & 0x10) == 0x10){
+    return -1;
+  }
+  // Tx of Command Succeeded
+  else if((resultStatus & 0x20) == 0x20){
+    return 0;
+  }
+  // Rx Data Present
+  else if((resultStatus & 0x40) == 0x40){
+    return 1;
+  }else{
+    return -2;
+  }
+}
+
+void set_addr_pipe(uint8_t* address, uint8_t length){
   // Set Tx Address
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(TX_ADDR+W_REGISTER); // Write Reg (001x_xxxx)
-  for(int i=0; i<5; i++){
-    SPI.transfer(newAddress[i]);
+  for(int i=0; i<length; i++){
+    SPI.transfer(address[i]);
   }
   digitalWrite(NRFCSn, HIGH);
   // Set Rx0 Address
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(RX_ADDR_P0+W_REGISTER); // Write Reg (001x_xxxx)
-  for(int i=0; i<5; i++){
-    SPI.transfer(newAddress[i]);
+  for(int i=0; i<length; i++){
+    SPI.transfer(address[i]);
   }
   digitalWrite(NRFCSn, HIGH);
-  // Clear STATUS Flags
-  clear_flags();
-  // Clear FIFOs
-  clear_fifos();
-
-  Serial.println("nRF Setup Complete!");
 }
 
-/*********************************/
-/********** Main Setup ***********/
-/*********************************/
-void setup(){
-  // Setup Serial Monitor
-  Serial.begin(115200);
-  totalHandshakes = 0;
-  failedHandshakes = 0;
-  // Setup the nRF Pins
-  pinMode(NRFCSn, OUTPUT);
-  pinMode(NRFIRQn, INPUT_PULLUP);
-  pinMode(NRFCE, OUTPUT);
-  // Begin SPI for the nRF Device
-  SPI.begin();
-  // Setup the nRF Device Configuration
-  nrfSetup();
-  // Setup the request timer
-  reqTimer.every(REQTIMERMILIS, timerISR);
-  // Setup the Interrupt Pin, parameterized
-  attachInterrupt(NRFIRQn, nrfISR, FALLING);
-
-  Serial.println("Core Setup Complete!");
+void get_addr_pipe(){
+  #ifdef FUNCALLS
+  Serial.println(F("get_addr_pipe()")); 
+  #endif
+  uint8_t current_tx_address[5];
+  uint8_t current_rx_address[5];
+  // Set Tx Address
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(TX_ADDR);
+  for(int i=0; i<5; i++){
+    current_tx_address[i] = SPI.transfer(NOP);
+  }
+  digitalWrite(NRFCSn, HIGH);
+  #ifdef DATAFLOW
+  Serial.print(F("Current Tx Address is: 0x"));
+  for(int i=0; i<5; i++){
+    Serial.print(current_tx_address[i], HEX);
+  }
+  Serial.println(F(" "));
+  #endif
+  // Set Rx0 Address
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(RX_ADDR_P0);
+  for(int i=0; i<5; i++){
+    current_rx_address[i] = SPI.transfer(NOP);
+  }
+  digitalWrite(NRFCSn, HIGH);
+  #ifdef DATAFLOW
+  Serial.print(F("Current Rx0 Address is: 0x"));
+  for(int i=0; i<5; i++){
+    Serial.print(current_rx_address[i], HEX);
+  }
+  Serial.println(F(" "));
+  #endif
 }
 
-/*********************************/
-/*********** Main Loop ***********/
-/*********************************/
-void loop(){
-  // Loop Variables
-  char payloadByteCountTop = 0;
-  word humidity = 0;
-  word temperature = 0;
+void register_producer(){
+  #ifdef FUNCALLS
+  Serial.println(F("register_producer()")); 
+  #endif
+  // Generate the random address
+  randomSeed(analogRead(AIN));
+  for(int i=0; i<6; i++){
+    producer_list.address[producer_list.registered_count][i] = random(256);
+  }
+  #ifdef DATAFLOW
+  Serial.print(F("Registered address is: 0x"));
+  for(int i=0; i<5; i++){
+    Serial.print(producer_list.address[producer_list.registered_count][i], HEX);
+  }
+  Serial.println(F(" "));
+  #endif
+  // Send the new address
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(W_TX_PAYLOAD);
+  SPI.transfer(REQADDR);
+  for(int i=0; i<6; i++){
+    SPI.transfer((uint8_t)(producer_list.address[producer_list.registered_count][i]));
+  }
+  digitalWrite(NRFCSn, HIGH);
+  // Set CE Hi (>10us) to Enable Tx
+  digitalWrite(NRFCE, HIGH);
+  delay(10);
+  digitalWrite(NRFCE, LOW);
+}
 
-  // This "updates" the timer, kind of lame but apparently it works
-  // may need to factor in variance when other code is running.
-  reqTimer.update();
-
-  // Service User Input
-  getUserInput();
-
-  switch(state){
-    case IDLE:
-      if(timerExpired == 1){
-        retryCount = 0;
-        timerExpired = 0;
-        #ifdef STATEDECODE
-        Serial.println("Consumer Loop >> IDLE going to DELAYTOTX");
-        #endif
-        state = DELAYTOTX;
-      }
+void decode_rx_fifo(){
+  #ifdef FUNCALLS
+  Serial.println(F("decode_rx_fifo()")); 
+  #endif
+  // Get number of bytes received
+  byte payloadByteCountTop = get_top_rx_fifo_count();
+  // Temp Storage
+  byte rxControl = NOP;
+  byte payloadBytes[(payloadByteCountTop-1)];
+  // Read out Received Bytes
+  digitalWrite(NRFCSn, LOW);
+  SPI.transfer(R_RX_PAYLOAD);
+  for(int i=0; i<payloadByteCountTop; i++){
+    if(i==0){
+      rxControl = SPI.transfer(NOP);
+    }else{
+      payloadBytes[(i-1)] = SPI.transfer(NOP);
+    }
+  }
+  digitalWrite(NRFCSn, HIGH);
+  // Decode the Incoming Command
+  switch(rxControl){
+    case REQADDR:
+      // When a request for address is performed, nothing is actually done in
+      // the consumer at this point. Maybe in the future it will register
+      // the requesting producer's serial number and/or it's capabilities
       break;
-    case CDSETUP:
-      if(nrfResults == 1){
-        nrfResults = 0;
-      }
-      // Power Up in Tx
-      power_up_rx();
-      // Wait for 1.5ms after Power Up Command
-      delay(10);
-      // Snapshot the current Millis count for later timeout
-      enterTxMillis = millis();
-      #ifdef STATEDECODE
-      Serial.println("Consumer Loop >> CDSETUP going to CARRIERCHECK");
-      #endif
-      state = CARRIERCHECK;
-      break;
-    case CARRIERCHECK:
-      if(nrfResults == 1){
-        nrfResults = 0;
-      }
-      // Grab Carrier Detection flag
-      if(get_carrier_detect_flag()){
-        #ifdef DATAFLOW
-        Serial.println("Consumer Loop >> CARRIERCHECK carrier detected, waiting");
-        #endif
-        if((millis() - enterTxMillis) >= TXFAILUREDELAY){
-          // Power Down
-          power_down();
-          // Wait for 1.5ms after Power Down Command
-          delay(2);
-          #ifdef STATEDECODE
-          Serial.println("Consumer Loop >> CARRIERCHECK going to CARRIERFAILURE");
-          #endif
-          state = CARRIERFAILURE;
-        }
-      }else{
-        enterTxMillis = millis();
-        #ifdef STATEDECODE
-        Serial.println("Consumer Loop >> CARRIERCHECK going to DELAYTOTX");
-        #endif
-        state = DELAYTOTX;
-      }
-      break;
-    case DELAYTOTX:
-      // Due to Async timing, delay a bit to make sure the other device is in
-      // Rx Mode before trying to send
-      if((millis() - enterTxMillis) >= DELAYTXMILLIS){
-        enterTxMillis = millis();
-        #ifdef STATEDECODE
-        Serial.println("Consumer Loop >> DELAYTOTX going to TXCOMMAND");
-        #endif
-        state = TXCOMMAND;
-      }
-      break;
-    case TXCOMMAND:
-      if(nrfResults == 1){
-        nrfResults = 0;
-      }
-      // Power Up in Tx
-      power_up_tx();
-      // Wait for 1.5ms after Power Up Command
-      delay(2);
-      // Clear FIFOs
-      clear_fifos();
-      // Update Current Timestamp
-      currentBootTime = millis();
-      // Write Data to the Payload FIFO
-      digitalWrite(NRFCSn, LOW);
-      SPI.transfer(W_TX_PAYLOAD); // Write Reg (001x_xxxx)
-      SPI.transfer(0x10);         // "Command" Word (Request Sample)
-      SPI.transfer(((currentTime+currentBootTime) >>  0) & 0xff);
-      SPI.transfer(((currentTime+currentBootTime) >>  8) & 0xff);
-      SPI.transfer(((currentTime+currentBootTime) >> 16) & 0xff);
-      SPI.transfer(((currentTime+currentBootTime) >> 24) & 0xff);
-      digitalWrite(NRFCSn, HIGH);
-      // Set CE Hi (>10us) to Enable Tx
-      digitalWrite(NRFCE, HIGH);
-      delay(10);
-      digitalWrite(NRFCE, LOW);
-      #ifdef STATEDECODE
-      Serial.println("Consumer Loop >> TXCOMMAND going to WAITFORSTATUS");
-      #endif
-      state = WAITFORSTATUS;
-      break;
-    case WAITFORSTATUS:
-      if(nrfResults == 1){
-        nrfResults = 0;
-        // Check Status Register for Results
-        resultStatus = get_status();
-        // Clear STATUS Flags
-        clear_flags();
-        #ifdef STATEDECODE
-        Serial.println("Consumer Loop >> WAITFORSTATUS going to DECODESTATUS");
-        #endif
-        state = DECODESTATUS;
-      }
-      break;
-    case DECODESTATUS:
-      // Clear FIFOs
-      clear_fifos();
-      // Tx Failed
-      if((resultStatus & 0x10) == 0x10){
-        if(retryCount >= 5){
-          retryCount = 0;
-          #ifdef STATEDECODE
-          Serial.println("Consumer Loop >> sensor response hard failure. Stopping..."); 
-          #endif
-          // Increment Failed Handshake Counter
-          failedHandshakes++;
-          // Power Down
-          power_down();
-          state = RETRYFAILURE;
-        }else{
-          retryCount += 1;
-          #ifdef STATEDECODE
-          Serial.println("Consumer Loop >> sensor response failed. Retrying...");
-          #endif
-          // Power Down
-          power_down();
-          state = DELAYTOTX;
-        }
-      }
-      // Tx of Command Succeeded
-      if((resultStatus & 0x20) == 0x20){
-        retryCount = 0;
-        totalHandshakes++;
-        #ifdef STATEDECODE
-        Serial.println("Consumer Loop >> DECODESTATUS going to SETUPRX");
-        #endif
-        state = SETUPRX;
-      }
-      // Rx Data Present
-      if((resultStatus & 0x40) == 0x40){
-        #ifdef DATAFLOW
-        Serial.println("Consumer Loop >> Why am I receiving data?!?");
-        Serial.println("Consumer Loop >> I'm trying to Tx a command!");
-        #endif
-      }
-      break;
-    case SETUPRX:
-      digitalWrite(NRFCE, LOW);
-      // Power Rx
-      power_up_rx();
-      // Wait for 1.5ms after Power Up Command
-      delay(2);
-      // Setup Rx, CE set HI until data received
-      digitalWrite(NRFCE, HIGH);
-      #ifdef STATEDECODE
-      Serial.println("Consumer Loop >> SETUPRX going to WAITFORRX");
-      #endif
-      state = WAITFORRX;
-      break;
-    case WAITFORRX:
-      if(nrfResults == 1){
-        nrfResults = 0;
-        #ifdef STATEDECODE
-        Serial.println("Consumer Loop >> WAITFORRX going to RXDATA");
-        #endif
-        state = RXDATA;
-      }
-      break;
-    case RXDATA:
-      // Clear STATUS Flags
-      clear_flags();
-      // Disable Rx
-      digitalWrite(NRFCE, LOW);
-      // Get number of bytes received
-      payloadByteCountTop = get_top_rx_fifo_count();
-      #ifdef DATAFLOW
-      Serial.print("Bytes reported in top FIFO entry is: ");
-      Serial.println(payloadByteCountTop, DEC);
-      #endif
-      // Temp Storage
-      byte payloadBytes[payloadByteCountTop];
-      // Read out Received Bytes
-      digitalWrite(NRFCSn, LOW);
-      SPI.transfer(R_RX_PAYLOAD);
-      for(int i=0; i<payloadByteCountTop; i++){
-        payloadBytes[i] = SPI.transfer(NOP);
-      }
-      digitalWrite(NRFCSn, HIGH);
+    case REQSENSOR:
       // The DHT11 currently returns 1 Byte for the 
       // integral part and 1 Byte for the franctional
       // part of each Humidity and Temp, however the
@@ -488,82 +784,62 @@ void loop(){
       // they are omitted in the DHT11 Library, 
       // returning only a single byte.
       #ifdef CONSUMERDATA
-        Serial.println("--- Sensor Data ---");
-        Serial.print("Time of last update [HH:MM]: ");
-        if(((currentTime+currentBootTime)/1000/60/60)%24 < 10){
-          Serial.print("0");
-        }
-        Serial.print(((currentTime+currentBootTime)/1000/60/60)%24, DEC);
-        Serial.print(":");
-        if((((currentTime+currentBootTime)/1000/60)%60) < 10){
-          Serial.print("0");
-        }
-        Serial.println((((currentTime+currentBootTime)/1000/60)%60), DEC);
-        #ifdef HTU21D
-          humidity = payloadBytes[0] + payloadBytes[1]*256;
-          temperature = payloadBytes[2] + payloadBytes[3]*256;
-          Serial.print("Humidity Value [%RH]: ");
-          Serial.println(((float)(-6.0) + (float)(125.0) * ((float)(humidity) / (float)(65536))), 2);
-          Serial.print("Internal Temp [F]: ");
-          Serial.println((((float)(-46.85) + (float)(175.72) * ((float)(temperature) / (float)(65536)))*9/5 + 32), 2);
-        #else
-          Serial.print("Humidity (%): ");
-          Serial.println(payloadBytes[0]);
-          Serial.print("Temperature (F): ");
-          Serial.println((payloadBytes[1]*1.8 + 32));
-        #endif
-        Serial.println("--- Comm Stats ---");
-        Serial.print("Total Comms: ");
-        Serial.println(totalHandshakes, DEC);
-        Serial.print("Failed Comms: ");
-        Serial.println(failedHandshakes, DEC);
-        Serial.println(" ");
+        int temperature = payloadBytes[0] + payloadBytes[1]*256;
+        int humidity = payloadBytes[2] + payloadBytes[3]*256;
+        print_sensor_data(temperature, humidity);
       #endif
-      // Clear FIFOs
-      clear_fifos();
-      // Power down the nRF
-      power_down();
-      // Clear the Retry Counter for Later
-      retryCount = 0;
-      #ifdef STATEDECODE
-      Serial.println("Consumer Loop >> RXDATA going to TRANSIDLE");
-      Serial.println(" ");
-      #endif
-      state = TRANSIDLE;
-      break;
-    case CARRIERFAILURE:
-      // Dead State, the Carrier detection state failed hard, never
-      // allowing this device to Tx sensor data
-      #ifdef STATEDECODE
-      Serial.println("Consumer Loop >> recovering from carrier failure...");
-      Serial.println(" ");
-      #endif
-      state = TRANSIDLE;
-      break;
-    case RETRYFAILURE:
-      // Dead State, the Retry of Sensor Data attempts exceeded the allowed
-      // number of retries
-      #ifdef STATEDECODE
-      Serial.println("Consumer Loop >> recovering from sensor response failure...");
-      Serial.println(" ");
-      #endif
-      state = TRANSIDLE;
-      break;
-    case TRANSIDLE:
-      // In IDLE, we're in Rx mode to allow for async requests from the producers
-      // for addresses or other services
-      power_up_rx();
-      state = IDLE;
-      break;
-    default:
-      timerExpired = 0;
-      retryCount = 0;
-      nrfResults = 0;
-      enterTxMillis = millis();
-      power_down();
-      state = TRANSIDLE;
       break;
   }
+  // Clear FIFOs
+  clear_fifos();
+}
+
+/*********************************/
+/******** Debug Functions ********/
+/*********************************/
+void print_current_time(unsigned long currentMillis){
+  Serial.print(F("Time of last update [HH:MM]: "));
+  if((currentMillis/1000/60/60)%24 < 10){
+    Serial.print(F("0"));
+  }
+  Serial.print((currentMillis/1000/60/60)%24, DEC);
+  Serial.print(F(":"));
+  if(((currentMillis/1000/60)%60) < 10){
+    Serial.print(F("0"));
+  }
+  Serial.println(((currentMillis/1000/60)%60), DEC);
+}
+
+void print_comm_stats(int total, int failed){
+  Serial.println(F("--- Comm Stats ---"));
+  Serial.print(F("Throughput Rate [%]: "));
+  Serial.println((((float)(total)-(float)(failed))/(float)(total))*100.0, 2);
+  Serial.print(F("Total Comms: "));
+  Serial.println(total, DEC);
+  Serial.print(F("Failed Comms: "));
+  Serial.println(failed, DEC);
+}
+
+void print_sensor_data(int temperature, int humidity){
+  // Magic Constants for Calculated Dew Point
+  float A = 8.1332;
+  float B = 1762.39;
+  float C = 235.66;
+  // Temperature and Humidity Values
+  float temp_C = (float)(-46.85) + (float)(175.72) * ((float)(temperature) / (float)(65536));
+  float temp_F = (((float)(-46.85) + (float)(175.72) * ((float)(temperature) / (float)(65536)))*9/5 + 32);
+  float humid = (float)(-6.0) + (float)(125.0) * ((float)(humidity) / (float)(65536));
+  // Intermediate Values for Calculated Dew Point
+  float pp_tamb = pow(10,(A - (B / (temp_C + C))));
+  // Calculated Dew Point
+  float tdew = (float)(-((B / ((log(humid * (pp_tamb / 100))) - A)) + C));
+  Serial.print(F("Internal Temp [F]: "));
+  Serial.println(temp_F, 2);
+  Serial.print(F("Humidity Value [%RH]: "));
+  Serial.println(humid, 2);
+  Serial.print(F("Calculated Dew Point [F]: "));
+  Serial.println(tdew,2);
+  Serial.println(F(" "));
 }
 
 void getUserInput(){
@@ -722,25 +998,26 @@ void getUserInput(){
         }
         break;
       case 67 :             // "C"
-        Serial.println("Cleared stats!");
+        Serial.println(F("Cleared stats!"));
         totalHandshakes = 0;
         failedHandshakes = 0;
         break;
       case 99 :             // "c"
-        Serial.println("Cleared stats!");
+        Serial.println(F("Cleared stats!"));
         totalHandshakes = 0;
         failedHandshakes = 0;
         break;
       case 84 :             // "T"
-        Serial.println("Cleared time entry!");
+        Serial.println(F("Cleared time entry!"));
         currentTime = 0;
         timeChar = 0;
         break;
       case 116 :             // "t"
-        Serial.println("Cleared time entry!");
+        Serial.println(F("Cleared time entry!"));
         currentTime = 0;
         timeChar = 0;
         break;
     }
   }
 }
+
