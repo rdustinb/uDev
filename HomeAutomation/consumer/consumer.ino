@@ -95,6 +95,8 @@ volatile unsigned int nrfResults;
 struct Producers {
   uint8_t address[ADDRESSCOUNT][5];
   uint8_t* p_address[ADDRESSCOUNT];
+  uint8_t serial_number[ADDRESSCOUNT][5];
+  uint8_t sequential_failed_samples[ADDRESSCOUNT];
   uint8_t registered_count;
   uint8_t service_count;
 } producer_list;
