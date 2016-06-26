@@ -1,8 +1,9 @@
 // Libraries Needed
 #include <SPI.h>
 #include <Wire.h>
+#include "Timer.h"
 
-// Used for debugging
+// Uncomment for debugging
 //#define STATEDECODE
 //#define FUNCALLS
 //#define DATAFLOW
@@ -17,7 +18,7 @@
 #define RSPFAILUREDELAY 500
 #define FAILUREDELAY 5000
 #define DELAYTXMILLIS 20
-#define REQTIMERMILIS 60000
+#define BLACKOUTTIMERMILIS 180000
 
 // Control Words
 #define REQADDR             0xF0
@@ -69,6 +70,7 @@ enum States {IDLE,RXTOTX_DELAYRX,RXTOTX_RXCOMMAND,RXTOTX_DELAYTOTX,
   RXTOTX_TXRESPONSE,RXTOTX_DELAYSTATUS,RXTOTX_DECODESTATUS,RXTOTX_TXFAILURE,
   TXTORX_DELAYTOTX,TXTORX_TXCOMMAND,TXTORX_DELAYSTATUS,TXTORX_DECODESTATUS,
   TXTORX_SETUPRX,TXTORX_DELAYRX,TXTORX_RXRESPONSE,TXTORX_TXFAILURE,DEAD} state;
+Timer blackoutTimer;
 
 // Globals
 byte defaultAddress[5] = {0x01,0x23,0x45,0x67,0x89};
@@ -76,6 +78,20 @@ byte* p_defaultAddress = defaultAddress;
 volatile unsigned long enterTxMillis;
 volatile uint8_t addressSet = 0;
 volatile uint8_t nrfResults = 0;
+volatile uint8_t sampleTimeout = 0;
+int timerID;
+
+/*********************************/
+/****** Blackout Timer ISR *******/
+/*********************************/
+void timerISR(){
+  cli();
+  #ifdef STATEDECODE
+  Serial.println(F("timerISR: timer expired!"));
+  #endif
+  sampleTimeout = 1;
+  sei();
+}
 
 /*********************************/
 /******** nRF Result ISR *********/
@@ -103,6 +119,8 @@ void setup(){
   SPI.begin();
   // Setup the nRF Device Configuration
   nrfSetup();
+  // Setup the request timer
+  timerID = blackoutTimer.every(BLACKOUTTIMERMILIS, timerISR);
   // Setup the Interrupt Pin, parameterized
   attachInterrupt(digitalPinToInterrupt(NRFIRQn), nrfISR, FALLING);
 
@@ -126,6 +144,8 @@ void loop(){
         #endif
         state = TXTORX_DELAYTOTX;
       }else{
+        // Create a new blackout timer for waiting for a data request
+        blackoutTimer.every(BLACKOUTTIMERMILIS, timerISR);
         power_up_rx();
         #ifdef STATEDECODE
         Serial.println(F("IDLE->RXTOTX_DELAYRX"));
@@ -137,12 +157,38 @@ void loop(){
           Receive First then Transmit Flow
     ******************************************/
     case RXTOTX_DELAYRX:
+      // Update the timer waiting for another request
+      blackoutTimer.update();
+
       if(nrfResults == 1){
         nrfResults = 0;
+        // Kill the blackout Timer
+        blackoutTimer.stop(timerID);
         #ifdef STATEDECODE
         Serial.println(F("RXTOTX_DELAYRX->RXTOTX_RXCOMMAND"));
         #endif
         state = RXTOTX_RXCOMMAND;
+      }else if(sampleTimeout){
+        // The Consumer hasn't requested data in a long time, this can happen
+        // if the Consumer has been power cycled and this producer has not
+        sampleTimeout = 0;
+        // Kill the blackout Timer
+        blackoutTimer.stop(timerID);
+        // Power Down
+        power_down();
+        // Clear the Set Address flag
+        addressSet = 0;
+        // Set the address to default
+        set_addr_pipe(p_defaultAddress,5);
+        // Clear STATUS Flags
+        clear_flags();
+        // Clear FIFOs
+        clear_fifos();
+        #ifdef STATEDECODE
+        Serial.println(F("RXTOTX_DELAYRX->IDLE"));
+        #endif
+        // Return to IDLE
+        state = IDLE;
       }
       break;
     case RXTOTX_RXCOMMAND:
