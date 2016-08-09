@@ -1,8 +1,16 @@
+// Libraries Needed
+#include <SPI.h>
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include "Timer.h"
+#include <EEPROM.h>
+
 // Used for debugging
 //#define STATEDECODE
 //#define DATAFLOW
 #define CONSUMERDATA
 //#define FUNCALLS
+#define ADDREGISTRATION
 
 // Teensy 3.1, Polling All Other Devices
 #define NRFCSn      10
@@ -10,20 +18,36 @@
 #define NRFCE       4
 #define AIN         23
 
-// Libraries Needed
-#include <SPI.h>
-#include <avr/io.h>
-#include <avr/interrupt.h>
-#include "Timer.h"
-
 // Address Registration Parameters
 #define ADDRESSCOUNT 32
 
-// Handshaking Time Values
-#define TXFAILUREDELAY 100
-#define RSPFAILUREDELAY 100
-#define FAILUREDELAY 1000
+// This parameter specifies the air data-rate that this device will communicate
+// with. Both ends of the rF pipe must communicate with the same data-rate.
+#define DATARATE 250
+// This parameter sets the transmitting power of this device, available values
+// are: 0, -6, -12 or -18 (representing dBm of power).
+#define RF_PWR 0
+// 4000us * # Retries allowed
+#define ARD 4000
+#define ARC 15
+// This timeout value waiting for a Tx result from the nRF is dependent
+// on the above 2 values. This delay is in ms, while the above values
+// are in us.
+#define TXFAILUREDELAY ((ARD*ARC*2)/1000)
+// This delay occurs when this device is waiting for a response from the remote
+// device. This device has already sent a successful transmission (according
+// to the nRF device) and is now waiting for the handshaking to send a response.
+// To reduce complexity it may be better to make this the same function as the
+// above value since the remote device goes through the above steps anyway.
+#define RSPFAILUREDELAY ((ARD*ARC*3)/1000)
+// This delay is how long to wait after this device initiates a handshake and
+// there is any kind of failure.
+#define FAILUREDELAY 5000
+// This delay is how long the device waits after receiving data to when it 
+// tries to transmit a response.
 #define DELAYTXMILLIS 20
+// This delay is consumer-specific, how long between sensor sample requests 
+// in milliseconds.
 #define REQTIMERMILIS 60000
 
 // Control Words
@@ -76,7 +100,7 @@
 enum States {IDLE,RXTOTX_RXCOMMAND,RXTOTX_DELAYTOTX,RXTOTX_TXRESPONSE,
   RXTOTX_DELAYSTATUS,RXTOTX_DECODESTATUS,RXTOTX_TXFAILURE,TXTORX_DELAYTOTX,
   TXTORX_TXCOMMAND,TXTORX_DELAYSTATUS,TXTORX_DECODESTATUS,TXTORX_SETUPRX,
-  TXTORX_DELAYRX,TXTORX_RXRESPONSE,TXTORX_TXFAILURE,DEAD} state;
+  TXTORX_DELAYRX,TXTORX_RXRESPONSE,TXTORX_TXFAILURE} state;
 Timer reqTimer;
 
 // Globals
@@ -153,15 +177,6 @@ void setup(){
   reqTimer.every(REQTIMERMILIS, timerISR);
   // Setup the Interrupt Pin, parameterized
   attachInterrupt(NRFIRQn, nrfISR, FALLING);
-  // Initialize the Address List Pointers
-  for(int i=0; i<ADDRESSCOUNT; i++){
-    producer_list.p_address[i] = &producer_list.address[i][0];
-  }
-  producer_list.registered_count = 0;
-  producer_list.service_count = 0;
-  // Always Power up in Rx Mode
-  power_up_rx();
-
   Serial.println(F("Core Setup Complete!"));
 }
 
@@ -279,6 +294,8 @@ void loop(){
       clear_fifos();
       // Power Down
       power_down();
+      // Set back to the default address
+      set_addr_pipe(p_defaultAddress,5);
       if(status == -1){
         #ifdef STATEDECODE
         Serial.println(F("Tx failed with nRf Max Retries, failing.")); 
@@ -296,8 +313,13 @@ void loop(){
         #endif
         // Increment the Registered Producer Count
         producer_list.registered_count++;
+        // Increment the EEPROM registered value
+        EEPROM.update(0, producer_list.registered_count);
+        #ifdef ADDREGISTRATION
+        Serial.print(F("Incrementing register producer count: ")); 
+        Serial.println(producer_list.registered_count, DEC);
+        #endif
         state = IDLE;
-        //state = DEAD;
       }
       break;
     case RXTOTX_TXFAILURE:
@@ -566,15 +588,25 @@ void nrfSetup(){
   digitalWrite(NRFCE, LOW);
   // Wait for 10.3ms for nRF to come up
   delay(11);
-  // Change to 1Mbps
+  // Change to parameterization set above
+  uint8_t RF_DATARATE_VAL = (((DATARATE == 250) ? 0x4 : 
+    ((DATARATE == 1) ? 0x0 : 
+    ((DATARATE == 2) ? : 0x1)))<<3);
+  uint8_t RF_POWER_VAL = ((RF_PWR == 0) ? 0x3 : 
+   ((RF_PWR == -6) ? 0x2 : 
+   ((RF_PWR == -12) ? 0x1 : 
+   ((RF_PWR == -18) ? 0x0 : 0x3))))<<1;
+  // OR-combine values to create the entire 
+  uint8_t RF_SETUP_VAL = RF_DATARATE_VAL | RF_POWER_VAL;
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(RF_SETUP+W_REGISTER);
-  SPI.transfer(0x7); // 0dB, LNA Gain, 1Mbps
+  SPI.transfer(RF_SETUP_VAL);
   digitalWrite(NRFCSn, HIGH);
-  // Change to 4000us Retry Delay
+  // Change default retry timeout, retry count values from above
   digitalWrite(NRFCSn, LOW);
+  uint8_t SETUP_RETR_VAL = (((ARD/250-1)<<4)+(ARC));
   SPI.transfer(SETUP_RETR+W_REGISTER);
-  SPI.transfer(0xF3);
+  SPI.transfer(SETUP_RETR_VAL);
   digitalWrite(NRFCSn, HIGH);
   // Change to Channel 1
   digitalWrite(NRFCSn, LOW);
@@ -596,6 +628,50 @@ void nrfSetup(){
   SPI.transfer(FEATURE+W_REGISTER);
   SPI.transfer(0x4); // Dynamic Payload Enable
   digitalWrite(NRFCSn, HIGH);
+  // Initialize the Address List Pointers
+  for(int i=0; i<ADDRESSCOUNT; i++){
+    producer_list.p_address[i] = &producer_list.address[i][0];
+  }
+  // Initialize the list of registered devices
+  producer_list.registered_count = EEPROM.read(0);
+  producer_list.service_count = 0;
+  #ifdef ADDREGISTRATION
+  Serial.print(F("Registered producer count: ")); 
+  Serial.println(producer_list.registered_count, DEC);
+  #endif
+  /*
+    0   Registered Device Count
+    1   Dev 0, Byte 0
+    2   Dev 0, Byte 1
+    3   Dev 0, Byte 2
+    4   Dev 0, Byte 3
+    5   Dev 0, Byte 4
+    6   Dev 1, Byte 0
+    7   Dev 1, Byte 1
+    8   Dev 1, Byte 2
+    9   Dev 1, Byte 3
+    10  Dev 1, Byte 4
+    11  Dev 2, Byte 0
+    12  Dev 2, Byte 1
+  */
+  for(int i=0; i<producer_list.registered_count; i++){
+    #ifdef ADDREGISTRATION
+    Serial.print(F("Registered address is: 0x"));
+    #endif
+    for(int j=0; j<5; j++){
+      uint8_t addrByte = EEPROM.read((i)*5+1+j);
+      producer_list.address[i][j] = addrByte;
+      #ifdef ADDREGISTRATION
+      Serial.print(addrByte, HEX);
+      #endif
+    }
+    #ifdef ADDREGISTRATION
+    Serial.println(F(" "));
+    #endif
+  }
+  // Always Power up in Rx Mode
+  power_up_rx();
+
   // Setup Pipe
   set_addr_pipe(p_defaultAddress,5);
   // Clear STATUS Flags
@@ -669,6 +745,9 @@ int decode_status(){
 }
 
 void set_addr_pipe(uint8_t* address, uint8_t length){
+  #ifdef ADDREGISTRATION
+  Serial.println(F("Changing address of PIPE"));
+  #endif
   // Set Tx Address
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(TX_ADDR+W_REGISTER); // Write Reg (001x_xxxx)
@@ -689,6 +768,7 @@ void get_addr_pipe(){
   #ifdef FUNCALLS
   Serial.println(F("get_addr_pipe()")); 
   #endif
+  #ifdef DATAFLOW
   uint8_t current_tx_address[5];
   uint8_t current_rx_address[5];
   // Set Tx Address
@@ -698,13 +778,11 @@ void get_addr_pipe(){
     current_tx_address[i] = SPI.transfer(NOP);
   }
   digitalWrite(NRFCSn, HIGH);
-  #ifdef DATAFLOW
   Serial.print(F("Current Tx Address is: 0x"));
   for(int i=0; i<5; i++){
     Serial.print(current_tx_address[i], HEX);
   }
   Serial.println(F(" "));
-  #endif
   // Set Rx0 Address
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(RX_ADDR_P0);
@@ -712,7 +790,6 @@ void get_addr_pipe(){
     current_rx_address[i] = SPI.transfer(NOP);
   }
   digitalWrite(NRFCSn, HIGH);
-  #ifdef DATAFLOW
   Serial.print(F("Current Rx0 Address is: 0x"));
   for(int i=0; i<5; i++){
     Serial.print(current_rx_address[i], HEX);
@@ -722,15 +799,34 @@ void get_addr_pipe(){
 }
 
 void register_producer(){
-  #ifdef FUNCALLS
+  #ifdef ADDREGISTRATION
   Serial.println(F("register_producer()")); 
   #endif
   // Generate the random address
   randomSeed(analogRead(AIN));
-  for(int i=0; i<6; i++){
-    producer_list.address[producer_list.registered_count][i] = random(256);
+  // Store the new address in EEPROM and in the working structure
+  for(int i=0; i<5; i++){
+    // Store at the address offset based on number of currently registered addresses
+    /*
+      0   Registered Device Count
+      1   Dev 0, Byte 0
+      2   Dev 0, Byte 1
+      3   Dev 0, Byte 2
+      4   Dev 0, Byte 3
+      5   Dev 0, Byte 4
+      6   Dev 1, Byte 0
+      7   Dev 1, Byte 1
+      8   Dev 1, Byte 2
+      9   Dev 1, Byte 3
+      10  Dev 1, Byte 4
+      11  Dev 2, Byte 0
+      12  Dev 2, Byte 1
+    */
+    byte addrByte = random(256);
+    EEPROM.update(((EEPROM.read(0)*5)+i+1), addrByte);
+    producer_list.address[producer_list.registered_count][i] = addrByte;
   }
-  #ifdef DATAFLOW
+  #ifdef ADDREGISTRATION
   Serial.print(F("Registered address is: 0x"));
   for(int i=0; i<5; i++){
     Serial.print(producer_list.address[producer_list.registered_count][i], HEX);
@@ -741,7 +837,7 @@ void register_producer(){
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(W_TX_PAYLOAD);
   SPI.transfer(REQADDR);
-  for(int i=0; i<6; i++){
+  for(int i=0; i<5; i++){
     SPI.transfer((uint8_t)(producer_list.address[producer_list.registered_count][i]));
   }
   digitalWrite(NRFCSn, HIGH);
@@ -845,181 +941,68 @@ void print_sensor_data(int temperature, int humidity){
 }
 
 void getUserInput(){
-  // Get User Input
-  if(Serial.available() > 0){
-    // Decode User Input, Convert to Time
-    switch(Serial.read()){
-      case 48 :             // "0"
-        if(timeChar == 0){
-          currentTime = 0*10*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 1){
-          currentTime = currentTime + 0*1*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 2){
-          currentTime = currentTime + 0*10*60*1000;
-          timeChar++;
-        }else if(timeChar == 3){
-          currentTime = currentTime + 0*1*60*1000;
-          timeChar = 0;
+  String content = "";
+  char character;
+
+  while(Serial.available()) {
+      character = Serial.read();
+      content.concat(character);
+  }
+
+  if(content != "") {
+    if(content == "clear EEPROM Entries"){
+      Serial.println("Clearing the EEPROM Entries...");
+      for(int i=0; i<10; i++){
+        EEPROM.update(i, 0);
+      }
+      for(int i=0; i<producer_list.registered_count; i++){
+        for(int j=0; j<5; j++){
+          producer_list.address[i][j] = 0;
+          producer_list.serial_number[i][j] = 0;
         }
-        break;
-      case 49 :             // "1"
-        if(timeChar == 0){
-          currentTime = 1*10*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 1){
-          currentTime = currentTime + 1*1*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 2){
-          currentTime = currentTime + 1*10*60*1000;
-          timeChar++;
-        }else if(timeChar == 3){
-          currentTime = currentTime + 1*1*60*1000;
-          timeChar = 0;
+        producer_list.sequential_failed_samples[i] = 0;
+      }
+      producer_list.registered_count = 0;
+    }
+    else if(content == "print Registered Producers"){
+      Serial.println("Registered Producer Struct:");
+      Serial.println(" Registered Addresses");
+      for(int i=0; i<3; i++){
+        Serial.print("  0x");
+        for(int j=0; j<5; j++){
+          Serial.print(producer_list.address[i][j], HEX);
         }
-        break;
-      case 50 :             // "2"
-        if(timeChar == 0){
-          currentTime = 2*10*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 1){
-          currentTime = currentTime + 2*1*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 2){
-          currentTime = currentTime + 2*10*60*1000;
-          timeChar++;
-        }else if(timeChar == 3){
-          currentTime = currentTime + 2*1*60*1000;
-          timeChar = 0;
+        Serial.println(" ");
+      }
+      Serial.println(" Registered Serial Numbers");
+      for(int i=0; i<3; i++){
+        Serial.print("  0x");
+        for(int j=0; j<5; j++){
+          Serial.print(producer_list.serial_number[i][j], HEX);
         }
-        break;
-      case 51 :             // "3"
-        if(timeChar == 0){
-          currentTime = 2*10*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 1){
-          currentTime = currentTime + 3*1*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 2){
-          currentTime = currentTime + 3*10*60*1000;
-          timeChar++;
-        }else if(timeChar == 3){
-          currentTime = currentTime + 3*1*60*1000;
-          timeChar = 0;
-        }
-        break;
-      case 52 :             // "4"
-        if(timeChar == 0){
-          currentTime = 2*10*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 1){
-          currentTime = currentTime + 4*1*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 2){
-          currentTime = currentTime + 4*10*60*1000;
-          timeChar++;
-        }else if(timeChar == 3){
-          currentTime = currentTime + 4*1*60*1000;
-          timeChar = 0;
-        }
-        break;
-      case 53 :             // "5"
-        if(timeChar == 0){
-          currentTime = 2*10*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 1){
-          currentTime = currentTime + 5*1*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 2){
-          currentTime = currentTime + 5*10*60*1000;
-          timeChar++;
-        }else if(timeChar == 3){
-          currentTime = currentTime + 5*1*60*1000;
-          timeChar = 0;
-        }
-        break;
-      case 54 :             // "6"
-        if(timeChar == 0){
-          currentTime = 2*10*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 1){
-          currentTime = currentTime + 6*1*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 2){
-          currentTime = currentTime + 5*10*60*1000;
-          timeChar++;
-        }else if(timeChar == 3){
-          currentTime = currentTime + 6*1*60*1000;
-          timeChar = 0;
-        }
-        break;
-      case 55 :             // "7"
-        if(timeChar == 0){
-          currentTime = 2*10*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 1){
-          currentTime = currentTime + 7*1*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 2){
-          currentTime = currentTime + 5*10*60*1000;
-          timeChar++;
-        }else if(timeChar == 3){
-          currentTime = currentTime + 7*1*60*1000;
-          timeChar = 0;
-        }
-        break;
-      case 56 :             // "8"
-        if(timeChar == 0){
-          currentTime = 2*10*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 1){
-          currentTime = currentTime + 8*1*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 2){
-          currentTime = currentTime + 5*10*60*1000;
-          timeChar++;
-        }else if(timeChar == 3){
-          currentTime = currentTime + 8*1*60*1000;
-          timeChar = 0;
-        }
-        break;
-      case 57 :             // "9"
-        if(timeChar == 0){
-          currentTime = 2*10*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 1){
-          currentTime = currentTime + 9*1*60*60*1000;
-          timeChar++;
-        }else if(timeChar == 2){
-          currentTime = currentTime + 5*10*60*1000;
-          timeChar++;
-        }else if(timeChar == 3){
-          currentTime = currentTime + 9*1*60*1000;
-          timeChar = 0;
-        }
-        break;
-      case 67 :             // "C"
-        Serial.println(F("Cleared stats!"));
-        totalHandshakes = 0;
-        failedHandshakes = 0;
-        break;
-      case 99 :             // "c"
-        Serial.println(F("Cleared stats!"));
-        totalHandshakes = 0;
-        failedHandshakes = 0;
-        break;
-      case 84 :             // "T"
-        Serial.println(F("Cleared time entry!"));
-        currentTime = 0;
-        timeChar = 0;
-        break;
-      case 116 :             // "t"
-        Serial.println(F("Cleared time entry!"));
-        currentTime = 0;
-        timeChar = 0;
-        break;
+        Serial.println(" ");
+      }
+      Serial.println(" Sequential Failed Sample Count");
+      for(int i=0; i<3; i++){
+        Serial.print("  ");
+        Serial.println(producer_list.sequential_failed_samples[i], DEC);
+      }
+      Serial.println(" Registered Count");
+      Serial.print("  ");
+      Serial.println(producer_list.registered_count, DEC);
+    }
+    else if(content == "print EEPROM Entries"){
+      Serial.println("EEPROM Values");
+      for(int i=0; i<10; i++){
+        Serial.print(i, DEC);
+        Serial.print(" --- 0x");
+        Serial.println(EEPROM.read(i), HEX);
+      }
+    }
+    else{
+      // Default sets the current time
+      Serial.print("Setting the time to: ");
+      Serial.println(content);
     }
   }
 }
-
