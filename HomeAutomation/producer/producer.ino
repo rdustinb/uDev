@@ -2,6 +2,7 @@
 #include <SPI.h>
 #include <Wire.h>
 #include "Timer.h"
+#include <EEPROM.h>
 
 // Uncomment for debugging
 //#define STATEDECODE
@@ -13,12 +14,32 @@
 #define NRFIRQn     3
 #define NRFCE       4
 
-// Handshaking Time Values
-#define TXFAILUREDELAY 100
-#define RSPFAILUREDELAY 500
+// This parameter specifies the air data-rate that this device will communicate
+// with. Both ends of the rF pipe must communicate with the same data-rate.
+#define DATARATE 250
+// This parameter sets the transmitting power of this device, available values
+// are: 0, -6, -12 or -18 (representing dBm of power).
+#define RF_PWR 0
+// 4000us * # Retries allowed
+#define ARD 4000
+#define ARC 15
+// This timeout value waiting for a Tx result from the nRF is dependent
+// on the above 2 values. This delay is in ms, while the above values
+// are in us.
+#define TXFAILUREDELAY ((ARD*ARC*2)/1000)
+// This delay occurs when this device is waiting for a response from the remote
+// device. This device has already sent a successful transmission (according
+// to the nRF device) and is now waiting for the handshaking to send a response.
+// To reduce complexity it may be better to make this the same function as the
+// above value since the remote device goes through the above steps anyway.
+#define RSPFAILUREDELAY ((ARD*ARC*3)/1000)
+// This delay is how long to wait after this device initiates a handshake and
+// there is any kind of failure.
 #define FAILUREDELAY 5000
+// This delay is how long the device waits after receiving data to when it 
+// tries to transmit a response.
 #define DELAYTXMILLIS 20
-#define BLACKOUTTIMERMILIS 180000
+// This delay is producer-specific for how long to wait for a data request from
 
 // Control Words
 #define REQADDR             0xF0
@@ -78,20 +99,7 @@ byte* p_defaultAddress = defaultAddress;
 volatile unsigned long enterTxMillis;
 volatile uint8_t addressSet = 0;
 volatile uint8_t nrfResults = 0;
-volatile uint8_t sampleTimeout = 0;
-int timerID;
-
-/*********************************/
-/****** Blackout Timer ISR *******/
-/*********************************/
-void timerISR(){
-  cli();
-  #ifdef STATEDECODE
-  Serial.println(F("timerISR: timer expired!"));
-  #endif
-  sampleTimeout = 1;
-  sei();
-}
+volatile unsigned long sampleTimeout = 0;
 
 /*********************************/
 /******** nRF Result ISR *********/
@@ -119,8 +127,6 @@ void setup(){
   SPI.begin();
   // Setup the nRF Device Configuration
   nrfSetup();
-  // Setup the request timer
-  timerID = blackoutTimer.every(BLACKOUTTIMERMILIS, timerISR);
   // Setup the Interrupt Pin, parameterized
   attachInterrupt(digitalPinToInterrupt(NRFIRQn), nrfISR, FALLING);
 
@@ -133,6 +139,9 @@ void setup(){
 void loop(){
   // Loop Variables
   int status;
+  
+  // Service the user input
+  getUserInput();
 
   // Loop Decode
   switch(state){
@@ -144,8 +153,8 @@ void loop(){
         #endif
         state = TXTORX_DELAYTOTX;
       }else{
-        // Create a new blackout timer for waiting for a data request
-        blackoutTimer.every(BLACKOUTTIMERMILIS, timerISR);
+        // Snapshot Current Time for delay of Sample Timeout
+        enterTxMillis = millis();
         power_up_rx();
         #ifdef STATEDECODE
         Serial.println(F("IDLE->RXTOTX_DELAYRX"));
@@ -157,38 +166,12 @@ void loop(){
           Receive First then Transmit Flow
     ******************************************/
     case RXTOTX_DELAYRX:
-      // Update the timer waiting for another request
-      blackoutTimer.update();
-
       if(nrfResults == 1){
         nrfResults = 0;
-        // Kill the blackout Timer
-        blackoutTimer.stop(timerID);
         #ifdef STATEDECODE
         Serial.println(F("RXTOTX_DELAYRX->RXTOTX_RXCOMMAND"));
         #endif
         state = RXTOTX_RXCOMMAND;
-      }else if(sampleTimeout){
-        // The Consumer hasn't requested data in a long time, this can happen
-        // if the Consumer has been power cycled and this producer has not
-        sampleTimeout = 0;
-        // Kill the blackout Timer
-        blackoutTimer.stop(timerID);
-        // Power Down
-        power_down();
-        // Clear the Set Address flag
-        addressSet = 0;
-        // Set the address to default
-        set_addr_pipe(p_defaultAddress,5);
-        // Clear STATUS Flags
-        clear_flags();
-        // Clear FIFOs
-        clear_fifos();
-        #ifdef STATEDECODE
-        Serial.println(F("RXTOTX_DELAYRX->IDLE"));
-        #endif
-        // Return to IDLE
-        state = IDLE;
       }
       break;
     case RXTOTX_RXCOMMAND:
@@ -510,15 +493,25 @@ void nrfSetup(){
   digitalWrite(NRFCE, LOW);
   // Wait for 10.3ms for nRF to come up
   delay(11);
-  // Change to 1Mbps
+  // Change to parameterization set above
+  uint8_t RF_DATARATE_VAL = (((DATARATE == 250) ? 0x4 : 
+    ((DATARATE == 1) ? 0x0 : 
+    ((DATARATE == 2) ? : 0x1)))<<3);
+  uint8_t RF_POWER_VAL = ((RF_PWR == 0) ? 0x3 : 
+   ((RF_PWR == -6) ? 0x2 : 
+   ((RF_PWR == -12) ? 0x1 : 
+   ((RF_PWR == -18) ? 0x0 : 0x3))))<<1;
+  // OR-combine values to create the entire 
+  uint8_t RF_SETUP_VAL = RF_DATARATE_VAL | RF_POWER_VAL;
   digitalWrite(NRFCSn, LOW);
   SPI.transfer(RF_SETUP+W_REGISTER);
-  SPI.transfer(0x7); // 0dB, LNA Gain, 1Mbps
+  SPI.transfer(RF_SETUP_VAL);
   digitalWrite(NRFCSn, HIGH);
-  // Change to 4000us Retry Delay
+  // Change default retry timeout, retry count values from above
   digitalWrite(NRFCSn, LOW);
+  uint8_t SETUP_RETR_VAL = (((ARD/250-1)<<4)+(ARC));
   SPI.transfer(SETUP_RETR+W_REGISTER);
-  SPI.transfer(0xF3);
+  SPI.transfer(SETUP_RETR_VAL);
   digitalWrite(NRFCSn, HIGH);
   // Change to Channel 1
   digitalWrite(NRFCSn, LOW);
@@ -540,8 +533,19 @@ void nrfSetup(){
   SPI.transfer(FEATURE+W_REGISTER);
   SPI.transfer(0x4); // Dynamic Payload Enable
   digitalWrite(NRFCSn, HIGH);
-  // Setup Pipe
-  set_addr_pipe(p_defaultAddress,5);
+  // Determine if our device is already configured with an address
+  if((EEPROM.read(0) & 0x1) == 0x1){
+    addressSet = 1;
+    byte myAddress[5];
+    byte* p_myAddress = myAddress;
+    for(int i=0; i<6; i++){
+      myAddress[i] = EEPROM.read((i+1));
+    }
+    set_addr_pipe(p_myAddress,5);
+  }else{
+    // Setup Default Pipe Address, will be requesting an address
+    set_addr_pipe(p_defaultAddress,5);
+  }
   // Clear STATUS Flags
   clear_flags();
   // Clear FIFOs
@@ -771,6 +775,12 @@ void decode_rx_fifo(){
   // Decode the Incoming Command
   switch(rxControl){
     case REQADDR:
+      // Flag that our address is configured
+      EEPROM.update(0,(EEPROM.read(0) | 0x1));
+      for(int i=0; i<6; i++){
+        // Store the received address in EEPROM
+        EEPROM.update((i+1), payloadBytes[i]);
+      }
       set_addr_pipe(p_payloadBytes,5);
       break;
     case REQSENSOR:
@@ -783,23 +793,32 @@ void decode_rx_fifo(){
 /*********************************/
 /******** Debug Functions ********/
 /*********************************/
-void print_current_time(unsigned long currentMillis){
-  Serial.print(F("Time of last update [HH:MM]: "));
-  if((currentMillis/1000/60/60)%24 < 10){
-    Serial.print(F("0"));
-  }
-  Serial.print((currentMillis/1000/60/60)%24, DEC);
-  Serial.print(F(":"));
-  if(((currentMillis/1000/60)%60) < 10){
-    Serial.print(F("0"));
-  }
-  Serial.println(((currentMillis/1000/60)%60), DEC);
-}
+void getUserInput(){
+  String content = "";
+  char character;
 
-void print_comm_stats(int total, int failed){
-  Serial.println(F("--- Comm Stats ---"));
-  Serial.print(F("Total Comms: "));
-  Serial.println(total, DEC);
-  Serial.print(F("Failed Comms: "));
-  Serial.println(failed, DEC);
+  while(Serial.available()) {
+      character = Serial.read();
+      content.concat(character);
+  }
+
+  if(content != "") {
+    if(content == "1"){
+      Serial.println("Clearing the EEPROM Entries...");
+      for(int i=0; i<6; i++){
+        EEPROM.update(i, 0x0);
+      }
+    }
+    else if(content == "2"){
+      Serial.println("EEPROM Values");
+      for(int i=0; i<6; i++){
+        Serial.print(i, DEC);
+        Serial.print(" --- 0x");
+        Serial.println(EEPROM.read(i), HEX);
+      }
+    }else{
+      Serial.print("I received: ");
+      Serial.println(content);
+    }
+  }
 }
