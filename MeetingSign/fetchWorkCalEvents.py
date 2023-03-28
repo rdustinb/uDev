@@ -1,5 +1,5 @@
 from pyicloud import PyiCloudService
-from datetime import datetime,date
+from datetime import datetime,date,timedelta
 from serial.tools import list_ports
 from serial import Serial
 import time
@@ -34,7 +34,9 @@ my_from_dt = datetime.fromtimestamp(datetime.timestamp(datetime.today()))
 my_to_dt   = datetime.fromtimestamp(datetime.timestamp(datetime.today()))
 for thisEvent in calendarService.get_events(from_dt=my_from_dt, to_dt=my_to_dt):
   if(thisEvent['pGuid'] == workCalGUID):
-    nextEventStart = datetime(*thisEvent['startDate'][1:6])
+    # Set the start time to 5 minutes before the actual calendar event
+    nextEventStart = datetime(*thisEvent['startDate'][1:6]) - timedelta(minutes=5)
+    # End time is exactly at the end of the calendar event
     nextEventEnd = datetime(*thisEvent['endDate'][1:6])
     currentTime = datetime.now()
     if DEBUG: print("%s, %s, %s"%(nextEventStart, nextEventEnd, currentTime))
