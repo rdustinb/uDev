@@ -1,0 +1,6 @@
+# Copy this file to 'config.py' in the same folder as the fetch python script...
+myIcloudEmail='your_icloud_email@domain.com'
+# If you wish the meeting sign to come on at the exact start time of the calendar event, change this to 0
+startTimeOffset=5
+# The BAUD shouldn't change unless absolutely needed to
+arduinoSerialBaud=115200
