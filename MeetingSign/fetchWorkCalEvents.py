@@ -6,8 +6,6 @@ import time
 import config
 import os
 
-serialBaud = 115200
-
 DEBUG=False
 ENABLE_SERIAL_UPDATE=True
 
@@ -35,7 +33,7 @@ my_to_dt   = datetime.fromtimestamp(datetime.timestamp(datetime.today()))
 for thisEvent in calendarService.get_events(from_dt=my_from_dt, to_dt=my_to_dt):
   if(thisEvent['pGuid'] == workCalGUID):
     # Set the start time to 5 minutes before the actual calendar event
-    nextEventStart = datetime(*thisEvent['startDate'][1:6]) - timedelta(minutes=5)
+    nextEventStart = datetime(*thisEvent['startDate'][1:6]) - timedelta(minutes=config.startTimeOffset)
     # End time is exactly at the end of the calendar event
     nextEventEnd = datetime(*thisEvent['endDate'][1:6])
     currentTime = datetime.now()
@@ -63,7 +61,7 @@ if ENABLE_SERIAL_UPDATE:
         thisDevice = p.device
     
     # Setup and Write to the Serial Device
-    serialIF = Serial(thisDevice, serialBaud, timeout=0.5)
+    serialIF = Serial(thisDevice, config.arduinoSerialBaud, timeout=0.5)
     
     # For this update, set the LED based on the calendar events checked above...
     if ledOn:
