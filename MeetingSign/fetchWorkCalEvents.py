@@ -3,13 +3,16 @@ from datetime import datetime,date
 from serial.tools import list_ports
 from serial import Serial
 import time
+import config
+import os
 
 serialBaud = 115200
 
 DEBUG=False
 ENABLE_SERIAL_UPDATE=True
 
-api = PyiCloudService('dustin.brothers@protonmail.com')
+os.system("icloud --username=%s"%config.myIcloudEmail)
+api = PyiCloudService(config.myIcloudEmail)
 
 ledOn = False # OFF by default...
 
