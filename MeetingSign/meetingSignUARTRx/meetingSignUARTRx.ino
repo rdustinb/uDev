@@ -1,94 +1,135 @@
-//#define DEBUGLOOP
-//#define DEBUGPRINT
-
-// Receive a Byte Packet
-struct {
-  uint8_t command;
-  uint8_t data;
-  uint8_t complete_flag;
-} rxBytePacket;
-
-// Delay
-uint8_t serial_available_last;
-uint8_t reading_bytes;
-uint8_t read_byte;
-
-// Different Packet Byte values
-const uint8_t WRITE_LED = 0x4c; // Capital "L"
-const uint8_t ON = 0x31; // ASCII "1"
-const uint8_t OFF = 0x30; // ASCII "0"
-const uint8_t EOP = 0x2e; // ASCII "."
-
-// LED
-const int LED = 13;
+#include "uart_led_pkg.h"
+#include "spi_led_pkg.h"
 
 void setup() {
+  pinMode(spiLatchPin, OUTPUT);
+  SPI.begin();
   Serial.begin(115200); // 1Byte every 69.4us
-  pinMode(LED, OUTPUT);
-  read_byte = 0;
+
+  // Initialize the Packet Structure
+  rxBytePacket.command = 0;
+  rxBytePacket.ledNumber = 0;
+  rxBytePacket.red = 0;
+  rxBytePacket.green = 0;
+  rxBytePacket.complete_flag = 0;
+
+  // Zeroize the LEDs
+  for(int thisLEDPWM=0; thisLEDPWM<LEDCOUNT; thisLEDPWM++){
+    LED_PWM[thisLEDPWM] = 0;
+  }
 }
 
 void loop() {
   // If we start getting bytes, delay to allow the bytes incoming to stabilize
   if(Serial.available() != serial_available_last){
-    delay(2); // Wait a small amount to allow byte reception to stabilize
-    #ifdef DEBUGPRINT
-    Serial.print("Current bytes available: ");
-    Serial.println(Serial.available());
-    #endif
     serial_available_last = Serial.available();
   // Once the incoming bytes have stabilized and completed, process them
   } else if(Serial.available() > 0){
-    #ifdef DEBUGLOOP
-    // Byte reception is stable
-    for(int thisByte=0; thisByte<serial_available_last; thisByte++){
-      read_byte = Serial.read();
-      Serial.print("I got: ");
-      Serial.println(read_byte, DEC);
-    }
-    #else
-    // Capture the Command Byte
-    rxBytePacket.command = Serial.read();
-    // Capture the Data Byte
-    rxBytePacket.data = Serial.read();
-    // Capture the Complete Flag Byte
-    rxBytePacket.complete_flag = Serial.read();
-    // Consume the rest of the read bytes
-    while(Serial.available() > 0){
-      Serial.read();
-    }
-    // Print Info
-    #ifdef DEBUGPRINT
-    Serial.println("Packet Received");
-    Serial.println(rxBytePacket.command, HEX);
-    Serial.println(rxBytePacket.data, HEX);
-    Serial.println(rxBytePacket.complete_flag, HEX);
-    #endif
-    // Decode The Packet
-    if(
-      rxBytePacket.command == WRITE_LED &&
-      rxBytePacket.complete_flag == EOP
-    ){
-      // Change the LED
-      if(rxBytePacket.data == ON){
-        digitalWrite(LED, HIGH); // Turn ON the LED
-      } else {
-        digitalWrite(LED, LOW); // Turn OFF the LED
+    process_uart_packet();
+  // By Default, keep writing to the LED 8bit Shift Registers
+  } else {
+    process_led_pwm();
+  }
+}
+
+void process_uart_packet(){
+  /*******************************************************************/
+  // Capture the Command Byte
+  rxBytePacket.command = Serial.read();
+  // If changing one LED, get the LED number
+  if(rxBytePacket.command == WRITE_LED){
+    // Capture the LED Number
+    rxBytePacket.ledNumber = (Serial.read() - 0x30) * 10;
+    rxBytePacket.ledNumber = rxBytePacket.ledNumber + (Serial.read() - 0x30);
+  }
+  // Capture the Red Byte
+  rxBytePacket.red = (Serial.read() - 0x30) * 10;
+  rxBytePacket.red = rxBytePacket.red + (Serial.read() - 0x30);
+  // Capture the Green Byte
+  rxBytePacket.green = (Serial.read() - 0x30) * 10;
+  rxBytePacket.green = rxBytePacket.green + (Serial.read() - 0x30);
+  // Capture the Blue Byte
+  rxBytePacket.blue = (Serial.read() - 0x30) * 10;
+  rxBytePacket.blue = rxBytePacket.blue + (Serial.read() - 0x30);
+  // Capture the Complete Flag Byte
+  rxBytePacket.complete_flag = Serial.read();
+  /*******************************************************************/
+  // Consume any erroneous bytes after the packet
+  while(Serial.available() > 0){
+    Serial.read();
+  }
+  /*******************************************************************/
+  // Check Packet for Validity
+  if(
+    rxBytePacket.command == WRITE_LED &&
+    rxBytePacket.ledNumber < (LEDCOUNT/3) &&
+    rxBytePacket.red <= PWMSTEPS &&
+    rxBytePacket.green <= PWMSTEPS &&
+    rxBytePacket.blue <= PWMSTEPS &&
+    rxBytePacket.complete_flag == EOP
+  ){
+    /*******************************************************************/
+    // Update the LED PWM Values
+    LED_PWM[rxBytePacket.ledNumber*3 + 0] = rxBytePacket.red; // RED
+    LED_PWM[rxBytePacket.ledNumber*3 + 1] = rxBytePacket.green; // GREEN
+    LED_PWM[rxBytePacket.ledNumber*3 + 2] = rxBytePacket.blue; // BLUE
+    // Return Good
+    Serial.println("0");
+  } else if(
+    rxBytePacket.command == WRITE_ALL_LEDS &&
+    rxBytePacket.red <= PWMSTEPS &&
+    rxBytePacket.green <= PWMSTEPS &&
+    rxBytePacket.blue <= PWMSTEPS &&
+    rxBytePacket.complete_flag == EOP
+  ){
+    /*******************************************************************/
+    // Update the LED PWM Values
+    for(int thisLEDPWM=0; thisLEDPWM<LEDCOUNT; thisLEDPWM++){
+      if(thisLEDPWM%3 == 0){
+        LED_PWM[thisLEDPWM] = rxBytePacket.red; // RED
+      } else if(thisLEDPWM%3 == 1) {
+        LED_PWM[thisLEDPWM] = rxBytePacket.green; // GREEN
+      } else if(thisLEDPWM%3 == 2) {
+        LED_PWM[thisLEDPWM] = rxBytePacket.blue; // BLUE
       }
-      #ifdef DEBUGPRINT
-      Serial.println("Packet processed...");
-      #else
-      Serial.println("0"); // Simply return a 0
-      #endif
-    } else {
-      #ifdef DEBUGPRINT
-      Serial.println("Command byte or Complete Flag byte were invalid. Packet dropped...");
-      #else
-      Serial.println("-1"); // Simply return -1
-      #endif
     }
-    // Sync the control byte
-    serial_available_last = Serial.available();
-    #endif
+    // Return Good
+    Serial.println("0");
+  } else {
+    // Return Bad, drop the packet...
+    Serial.println("-1");
+  }
+  /*******************************************************************/
+  // Update the Last Byte Count
+  serial_available_last = Serial.available();
+}
+
+void process_led_pwm(){
+  // Loop through each PWM Step for all LED RGBs...
+  for(int pwmLoop=PWMSTEPS-1; pwmLoop>=0; pwmLoop--){
+    /*******************************************************************/
+    // The SPI Write out expects bytes of data, so we will flip the bits
+    // to 1 when the pwmLoop gets to the level stored in the particular
+    // LED_PWM array
+    for(int thisLED=0; thisLED<LEDCOUNT; thisLED++){
+      if(LED_PWM[thisLED] > pwmLoop){
+        // OR in the new flag
+        LED_SPI_BITS[thisLED/8] = LED_SPI_BITS[thisLED/8] | ((0x1 << thisLED%8) & 0xFF);
+      }
+    }
+    /*******************************************************************/
+    // Write to the shift registers
+    for(int thisByte=LEDCOUNT/8-1; thisByte>=0; thisByte--){
+      // Send the Byte
+      SPI.transfer(LED_SPI_BITS[thisByte]);
+    }
+    // Store what's on the shift registers to the storage registers
+    digitalWrite(spiLatchPin, HIGH);
+    digitalWrite(spiLatchPin, LOW);
+    /*******************************************************************/
+    // Reset the bits for the next loop...
+    for(int thisLED=0; thisLED<LEDCOUNT; thisLED++){
+      LED_SPI_BITS[thisLED/8] = 0;
+    }
   }
 }
