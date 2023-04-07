@@ -17,8 +17,8 @@ const int spiLatchPin = 8;
 // Ex: if you have 8 RGB LEDs, set this to 24
 const int LEDCOUNT = 24;
 
-// Defines the number of unique PWM steps, 16 seems like enough
-const int PWMSTEPS = 16;
+// Defines the number of unique PWM steps, 32 seems like enough
+const int PWMSTEPS = 32;
 
 const int SPICLOCKf = 110000000;
 SPISettings mySetting(SPICLOCKf, MSBFIRST, SPI_MODE0);
@@ -32,16 +32,15 @@ byte LED_SPI_BITS[LEDCOUNT/8];
 // Setup sets the 74AHC595 Latch Pin mode and starts the SPI interface
 void setup() {
   pinMode(spiLatchPin, OUTPUT);
-  digitalWrite(spiLatchPin, LOW);
   Serial.begin(115200);
   SPI.begin();
-  // Set the LEDs
 
-  for(int thisLEDPWM=0; thisLEDPWM<24; thisLEDPWM++){
+  // Set the LEDs
+  for(int thisLEDPWM=0; thisLEDPWM<LEDCOUNT; thisLEDPWM++){
     if(thisLEDPWM%3 == 0){
-      LED_PWM[thisLEDPWM] = 2; // RED
+      LED_PWM[thisLEDPWM] = 3; // RED
     } else if(thisLEDPWM%3 == 1) {
-      LED_PWM[thisLEDPWM] = 2; // GREEN
+      LED_PWM[thisLEDPWM] = 4; // GREEN
     } else if(thisLEDPWM%3 == 2) {
       LED_PWM[thisLEDPWM] = 16; // BLUE
     }
