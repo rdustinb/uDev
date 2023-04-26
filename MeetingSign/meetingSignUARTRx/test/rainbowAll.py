@@ -1,4 +1,5 @@
 import config
+import time
 from serial.tools import list_ports
 from serial import Serial
 
@@ -11,7 +12,8 @@ for p in port:
 # Setup and Write to the Serial Device
 serialIF = Serial(thisDevice, config.arduinoSerialBaud, timeout=0.5)
 
-serialIF.write('A240102.\r\n'.encode('raw_unicode_escape'))
-    
+# Red
+serialIF.write('M0016000002160100041603000600080007000801050000160305001601160016.\r\n'.encode('raw_unicode_escape'))
+
 # Close the IF
 serialIF.close()

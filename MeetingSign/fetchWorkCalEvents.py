@@ -9,8 +9,8 @@ import os
 DEBUG=False
 ENABLE_SERIAL_UPDATE=True
 
-os.system("icloud --username=%s"%config.myIcloudEmail)
-api = PyiCloudService(config.myIcloudEmail)
+#os.system("icloud --username=%s"%config.myIcloudEmail)
+api = PyiCloudService(config.myIcloudEmail, config.myIcloudPassword)
 
 ledOn = False # OFF by default...
 
@@ -18,20 +18,20 @@ ledOn = False # OFF by default...
 calendarService = api.calendar
 
 # Fetch all the calendars
-allCals = calendarService.get_calendars(as_objs=True)
+#allCals = calendarService.get_calendars(as_objs=True)
 
 # Get the Work Calendar GUID
-workCalGUID = ''
-for thisCal in allCals:
-  if thisCal.title == 'Work':
-    workCalGUID = thisCal.guid
-    break
+#workCalGUID = ''
+#for thisCal in allCals:
+#  if thisCal.title == 'Work':
+#    workCalGUID = thisCal.guid
+#    break
 
 # Get the events for today
 my_from_dt = datetime.fromtimestamp(datetime.timestamp(datetime.today()))
 my_to_dt   = datetime.fromtimestamp(datetime.timestamp(datetime.today()))
 for thisEvent in calendarService.get_events(from_dt=my_from_dt, to_dt=my_to_dt):
-  if(thisEvent['pGuid'] == workCalGUID):
+  if(thisEvent['pGuid'] == config.myCalendarpGuid): # workCalGUID):
     # Set the start time to 5 minutes before the actual calendar event
     nextEventStart = datetime(*thisEvent['startDate'][1:6]) - timedelta(minutes=config.startTimeOffset)
     # End time is exactly at the end of the calendar event
@@ -65,9 +65,10 @@ if ENABLE_SERIAL_UPDATE:
     
     # For this update, set the LED based on the calendar events checked above...
     if ledOn:
-        serialIF.write('L1.\r\n'.encode('raw_unicode_escape'))
+        serialIF.write('A020116.\r\n'.encode('raw_unicode_escape'))
     else:
-        serialIF.write('L0.\r\n'.encode('raw_unicode_escape'))
+        serialIF.write('A000000.\r\n'.encode('raw_unicode_escape'))
     
     # Close the IF
     serialIF.close()
+
