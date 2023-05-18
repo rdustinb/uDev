@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+    <dict>
+        <key>Label</key>
+        <string>local.meetingSign</string>
+        <key>ProgramArguments</key>
+        <array>
+		<!--
+			I use the Homebrew version of Python3. Even using #! in the python script, Apple's Launch Agent
+			system still tries using the Xcode Command Line version where most of the packages used are
+			not installed.
+			If you want to use the built-in Apple Python3 which comes with Xcode Command Line, just change
+			this next line to be "python3" without the quotes.
+		-->
+		<string>/opt/homebrew/bin/python3</string>
+		<!--
+			Replace <user> everywhere in this file with your username on your mac. Also, if you cloned this
+			from git, just put the path to the python script here.
+		-->
+		<string>/Users/<user>/path/to/fetchWorkCalEvents.py</string>
+	</array>
+	<key>StartInterval</key>
+	<!-- 
+		This value is in seconds, change this to as frequently as you'd like this script to run. 
+	-->
+	<integer>20</integer>
+	<!--
+		I have the logs go into the same LaunchAgents folder where this .plist file needs
+		to be copied to.
+	-->
+        <key>StandardOutPath</key>
+	<string>/Users/<user>/Library/LaunchAgents/meetingSign.log</string>
+        <key>StandardErrorPath</key>
+	<string>/Users/<user>/Library/LaunchAgents/meetingSign.log</string>
+    </dict>
+</plist>
+

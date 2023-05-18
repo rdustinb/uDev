@@ -1,7 +1,11 @@
+#!/opt/homebrew/bin/python3
+
 from pyicloud import PyiCloudService
+from pyicloud.exceptions import PyiCloudFailedLoginException
 from datetime import datetime,date,timedelta
 from serial.tools import list_ports
 from serial import Serial
+import sys
 import time
 import config
 import os
@@ -10,7 +14,14 @@ DEBUG=False
 ENABLE_SERIAL_UPDATE=True
 
 #os.system("icloud --username=%s"%config.myIcloudEmail)
-api = PyiCloudService(config.myIcloudEmail, config.myIcloudPassword)
+try:
+    api = PyiCloudService(config.myIcloudEmail, config.myIcloudPassword)
+except PyiCloudFailedLoginException as e:
+    # When the authentication token is expired...
+    print("Reauthentication of the iCloud account is needed...")
+    os.system("icloud --username=%s"%config.myIcloudEmail)
+    api = PyiCloudService(config.myIcloudEmail, config.myIcloudPassword)
+    print("Continuing of the calendar fetching...")
 
 ledOn = False # OFF by default...
 
@@ -65,10 +76,12 @@ if ENABLE_SERIAL_UPDATE:
     
     # For this update, set the LED based on the calendar events checked above...
     if ledOn:
-        serialIF.write('A020116.\r\n'.encode('raw_unicode_escape'))
+        serialIF.write('M0016000002160100041603000600080007000801050000160305001601160016.\r\n'.encode('raw_unicode_escape'))
     else:
         serialIF.write('A000000.\r\n'.encode('raw_unicode_escape'))
     
     # Close the IF
     serialIF.close()
+
+print("Last updated: %s"%(datetime.now()))
 
