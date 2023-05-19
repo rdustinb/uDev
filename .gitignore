@@ -27,3 +27,4 @@
 *.out
 *.app
 MeetingSign/config.py
+MeetingSign/meetingSign.plist
