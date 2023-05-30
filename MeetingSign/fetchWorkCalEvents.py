@@ -77,7 +77,7 @@ if ENABLE_CALENDAR_FETCH:
         nextEventEnd = datetime(*thisEvent['endDate'][1:6])
         if DEBUG: print("%s, %s, %s"%(nextEventStart, nextEventEnd, currentTime))
         if(currentTime > nextEventStart and currentTime < nextEventEnd):
-            if DEBUG: print("We are in a calendar event, enabling LED, breaking loop!")
+            print("We are in a calendar event, enabling LED, breaking loop!")
             # If we've found one instance, stop scanning the events
             ledOn = True
             break
