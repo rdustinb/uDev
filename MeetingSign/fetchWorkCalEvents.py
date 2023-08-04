@@ -81,36 +81,37 @@ if ENABLE_CALENDAR_FETCH:
             # If we've found one instance, stop scanning the events
             ledOn = True
             break
-    
-    if ENABLE_SERIAL_UPDATE:
-        # Get the Serial USB Device
-        port = list(list_ports.comports())
-        for p in port:
-          if(p.usb_description() == 'USB Serial'):
-            thisDevice = p.device
-        
-        try:
-            # Setup and Write to the Serial Device
-            serialIF = Serial(thisDevice, config.arduinoSerialBaud, timeout=0.5)
-        
-            # For this update, set the LED based on the calendar events checked above...
-            if ledOn:
-                serialIF.write('M0016000002160100041603000600080007000801050000160305001601160016.\r\n'.encode('raw_unicode_escape'))
-            else:
-                serialIF.write('A000000.\r\n'.encode('raw_unicode_escape'))
-
-            # Get the response...
-            if int(serialIF.read(2).decode('utf-8')) != 0:
-                print('uController Failure response.')
-                raise ValueError('uController Failure response.')
-            #print(int(serialIF.read(2).decode('utf-8')) == 0)
-        
-            # Close the IF
-            serialIF.close()
-
-            # Print that the update finished successfully
-            print("Last updated: %s"%(datetime.now()))
-        except:
-            print("Updating the meeting sign through the USB interface failed...")
 else:
-    print("Quiet Time, update skipped: %s"%(datetime.now()))
+    ledOn = False
+    print("Quiet Time, disabling the sign...")
+    
+if ENABLE_SERIAL_UPDATE:
+    # Get the Serial USB Device
+    port = list(list_ports.comports())
+    for p in port:
+      if(p.usb_description() == 'USB Serial'):
+        thisDevice = p.device
+    
+    try:
+        # Setup and Write to the Serial Device
+        serialIF = Serial(thisDevice, config.arduinoSerialBaud, timeout=0.5)
+    
+        # For this update, set the LED based on the calendar events checked above...
+        if ledOn:
+            serialIF.write('M0016000002160100041603000600080007000801050000160305001601160016.\r\n'.encode('raw_unicode_escape'))
+        else:
+            serialIF.write('A000000.\r\n'.encode('raw_unicode_escape'))
+
+        # Get the response...
+        if int(serialIF.read(2).decode('utf-8')) != 0:
+            print('uController Failure response.')
+            raise ValueError('uController Failure response.')
+        #print(int(serialIF.read(2).decode('utf-8')) == 0)
+    
+        # Close the IF
+        serialIF.close()
+
+        # Print that the update finished successfully
+        print("Last updated: %s"%(datetime.now()))
+    except:
+        print("Updating the meeting sign through the USB interface failed...")
