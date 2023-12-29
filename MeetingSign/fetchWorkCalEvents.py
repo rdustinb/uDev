@@ -14,6 +14,11 @@ DEBUG=False
 ENABLE_SERIAL_UPDATE=True
 ENABLE_CALENDAR_FETCH=False
 
+# Check the manual configuration, if enabled, don't change it
+if config.manual:
+    print("Meeting sign was manually enabled, quitting automatic script...")
+    sys.exit()
+
 # Check if the configuration has quiet times
 try:
     # Get the Start time from config.py
