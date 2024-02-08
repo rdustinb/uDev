@@ -47,6 +47,7 @@ if ENABLE_SERIAL_UPDATE:
     for p in port:
       if(p.usb_description() == 'USB Serial'):
         thisDevice = p.device
+        print("I am attempting to update device: %s..."%(thisDevice))
     
     try:
         # Setup and Write to the Serial Device
@@ -62,12 +63,12 @@ if ENABLE_SERIAL_UPDATE:
         if int(serialIF.read(2).decode('utf-8')) != 0:
             print('uController Failure response.')
             raise ValueError('uController Failure response.')
-        #print(int(serialIF.read(2).decode('utf-8')) == 0)
     
         # Close the IF
         serialIF.close()
 
         # Print that the update finished successfully
         print("Last updated: %s"%(datetime.now()))
-    except:
+    except Exception as e:
+        print(e)
         print("Updating the meeting sign through the USB interface failed...")

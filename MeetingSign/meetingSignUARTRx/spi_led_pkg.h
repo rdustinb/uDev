@@ -18,7 +18,7 @@ const int LEDCOUNT = 24;
 // Defines the number of unique PWM steps, 16 seems like enough
 const int PWMSTEPS = 32;
 
-const int SPICLOCKf = 110000000;
+const int SPICLOCKf = 90000000;
 SPISettings mySetting(SPICLOCKf, MSBFIRST, SPI_MODE0);
 
 // Stored as LED1 Red, LED1 Green, LED1 Blue, LED2 Red...

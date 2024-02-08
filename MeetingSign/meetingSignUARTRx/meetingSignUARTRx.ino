@@ -28,6 +28,9 @@ void loop() {
   // If we start getting bytes, delay to allow the bytes incoming to stabilize
   if(Serial.available() != serialAvailableLast){
     serialAvailableLast = Serial.available();
+    // This irons out some variability of the USB UART reception of bytes if it is a really
+    // long delay between bytes for some reason...
+    delay(5);
   // Once the incoming bytes have stabilized and completed, process them
   } else if(Serial.available() > 0){
     process_uart_packet();
@@ -47,7 +50,13 @@ void process_uart_packet(){
       break; // If the end of the packet has been received, stop processing...
     }
   }
-  
+
+  /*******************************************************************/
+  // Flush the remaining bytes if needed...
+  while(Serial.available() != 0){
+    Serial.read();
+  }
+
   /*******************************************************************/
   // Branch based on Packet Type
   if(packetBytes[0] == WRITE_ALL_LEDS){
@@ -99,7 +108,7 @@ void process_uart_packet(){
       Serial.println("0");
     } else {
       // Return Bad
-      Serial.println("-1");
+      Serial.println("-2");
     }
   }
 
