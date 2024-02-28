@@ -23,4 +23,5 @@ uint8_t packetGood;
 // Different Packet Byte values
 const uint8_t WRITE_MULTIPLE_LEDS = 0x4D; // Capital "M"
 const uint8_t WRITE_ALL_LEDS = 0x41; // Capital "A"
+const uint8_t READ_ALL_LEDS = 0x52; // Capital "R"
 const uint8_t EOP = 0x2e; // ASCII "."

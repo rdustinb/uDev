@@ -110,6 +110,11 @@ void process_uart_packet(){
       // Return Bad
       Serial.println("-2");
     }
+  } else if(packetBytes[0] == READ_ALL_LEDS){
+    for(int thisByte=0; thisByte<LEDCOUNT; thisByte++){
+      Serial.print(LED_PWM[thisByte]);
+    }
+    Serial.println("0");
   }
 
   /*******************************************************************/
