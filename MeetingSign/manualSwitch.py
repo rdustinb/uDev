@@ -4,7 +4,11 @@ from datetime import datetime
 from serial.tools import list_ports
 from serial import Serial
 import sys
-import config
+import configparser
+import os
+
+# For updating the configuation file:
+configFile = os.path.join(os.getcwd(), "config.ini")
 
 ENABLE_SERIAL_UPDATE=True
 
@@ -21,24 +25,28 @@ except:
 # Update the config to block automatic sign updates...
 thisConfig = list()
 if ledOn:
-    with open("config.py", "r") as fh_r:
+    with open(configFile, "r") as fh_r:
         for thisLine in fh_r:
             if thisLine.find("manual") != -1:
-                thisConfig.append("manual=True\n")
+                thisConfig.append("manual = True\n")
             else:
                 thisConfig.append(str(thisLine))
 else:
-    with open("config.py", "r") as fh_r:
+    with open(configFile, "r") as fh_r:
         for thisLine in fh_r:
             if thisLine.find("manual") != -1:
-                thisConfig.append("manual=False\n")
+                thisConfig.append("manual = False\n")
             else:
                 thisConfig.append(str(thisLine))
 
 # Store the new manual configuration
-with open("config.py", "w") as fh_w:
+with open(configFile, "w") as fh_w:
     for thisLine in thisConfig:
         fh_w.write(thisLine)
+
+# Read in the current configuration
+config = configparser.ConfigParser()
+config.read('config.ini')
 
 # Update the sign manually
 if ENABLE_SERIAL_UPDATE:
@@ -51,7 +59,7 @@ if ENABLE_SERIAL_UPDATE:
     
     try:
         # Setup and Write to the Serial Device
-        serialIF = Serial(thisDevice, config.arduinoSerialBaud, timeout=0.5)
+        serialIF = Serial(thisDevice, config.get('DEFAULT', 'arduinoSerialBaud'), timeout=0.5)
     
         # For this update, set the LED based on the calendar events checked above...
         if ledOn:

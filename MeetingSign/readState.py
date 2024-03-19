@@ -2,9 +2,13 @@
 
 from serial.tools import list_ports
 from serial import Serial
-import config
+import configparser
 
 ENABLE_SERIAL_READ=True
+
+# Read in the current configuration
+config = configparser.ConfigParser()
+config.read('config.ini')
 
 # Update the sign manually
 if ENABLE_SERIAL_READ:
@@ -17,7 +21,7 @@ if ENABLE_SERIAL_READ:
     
     try:
         # Setup and Write to the Serial Device
-        serialIF = Serial(thisDevice, config.arduinoSerialBaud, timeout=0.5)
+        serialIF = Serial(thisDevice, config.get('DEFAULT', 'arduinoSerialBaud'), timeout=0.5)
     
         # Send a read command, will get back 64 bytes
         serialIF.write('R.\r\n'.encode('raw_unicode_escape'))
