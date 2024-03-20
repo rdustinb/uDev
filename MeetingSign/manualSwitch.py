@@ -8,7 +8,7 @@ import configparser
 import os
 
 # For updating the configuation file:
-configFile = os.path.join(os.getcwd(), "config.ini")
+configFile = os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.ini")
 
 ENABLE_SERIAL_UPDATE=True
 
@@ -46,7 +46,7 @@ with open(configFile, "w") as fh_w:
 
 # Read in the current configuration
 config = configparser.ConfigParser()
-config.read('config.ini')
+config.read(configFile)
 
 # Update the sign manually
 if ENABLE_SERIAL_UPDATE:

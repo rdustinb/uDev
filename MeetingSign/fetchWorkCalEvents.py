@@ -10,9 +10,12 @@ import time
 import configparser
 import os
 
+# For updating the configuation file:
+configFile = os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.ini")
+
 # Read in the current configuration
 config = configparser.ConfigParser()
-config.read('config.ini')
+config.read(configFile)
 
 DEBUG=False
 ENABLE_SERIAL_UPDATE=True
