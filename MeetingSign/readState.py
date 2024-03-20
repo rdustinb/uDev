@@ -6,9 +6,12 @@ import configparser
 
 ENABLE_SERIAL_READ=True
 
+# For updating the configuation file:
+configFile = os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.ini")
+
 # Read in the current configuration
 config = configparser.ConfigParser()
-config.read('config.ini')
+config.read(configFile)
 
 # Update the sign manually
 if ENABLE_SERIAL_READ:
