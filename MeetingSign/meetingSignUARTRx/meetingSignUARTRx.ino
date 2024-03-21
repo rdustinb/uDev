@@ -116,7 +116,7 @@ void process_uart_packet(){
       Serial.print(","); // For reading back, need an LED delimeter...
     }
     // Return Good
-    Serial.println("*0*");
+    Serial.println("0");
   }
 
   /*******************************************************************/

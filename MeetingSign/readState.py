@@ -28,9 +28,11 @@ try:
     serialIF.write('R.\r\n'.encode('raw_unicode_escape'))
 
     # Get the response...
-    thisResponse = serialIF.readline().decode('UTF-8').split(",")[:-1]
-    print(thisResponse)
-    print(len(thisResponse))
+    thisResponse = serialIF.readline().decode('UTF-8').split(",")
+    if int(thisResponse[-1]) == 0:
+        print(thisResponse[:-1])
+    else:
+        print("Read of state failed.")
 
     # Close the IF
     serialIF.close()
