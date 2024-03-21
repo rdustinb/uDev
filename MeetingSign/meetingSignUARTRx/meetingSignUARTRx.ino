@@ -90,7 +90,7 @@ void process_uart_packet(){
       // Parse all the LED Tuples
       while(packetBytes[0] != EOP){
         // Stuff the RGB Values into the Struct
-        calculate_led_rgb_with_led();
+        calculate_led_rgb_with_lednumber();
 
         // Stuff the RGB Values into the LED PWM Array
         LED_PWM[(ledRgb.ledNumber*3) + 0] = ledRgb.red;
@@ -113,8 +113,10 @@ void process_uart_packet(){
   } else if(packetBytes[0] == READ_ALL_LEDS){
     for(int thisByte=0; thisByte<LEDCOUNT; thisByte++){
       Serial.print(LED_PWM[thisByte]);
+      Serial.print(","); // For reading back, need an LED delimeter...
     }
-    Serial.println("0");
+    // Return Good
+    Serial.println("*0*");
   }
 
   /*******************************************************************/
@@ -128,7 +130,7 @@ void calculate_led_rgb(){
   ledRgb.blue  = ((packetBytes[5]-0x30) * 10) + (packetBytes[6]-0x30);
 }
 
-void calculate_led_rgb_with_led(){
+void calculate_led_rgb_with_lednumber(){
   ledRgb.ledNumber = ((packetBytes[0]-0x30) * 10) + (packetBytes[1]-0x30);
   ledRgb.red   = ((packetBytes[2]-0x30) * 10) + (packetBytes[3]-0x30);
   ledRgb.green = ((packetBytes[4]-0x30) * 10) + (packetBytes[5]-0x30);
