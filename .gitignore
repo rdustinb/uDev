@@ -26,5 +26,10 @@
 *.exe
 *.out
 *.app
-MeetingSign/config.py
+
+# Python Caches
+*__pycache__
+
+# Custom configuration files (don't store as they will leak sensitive information)
+MeetingSign/config.ini
 MeetingSign/meetingSign.plist
