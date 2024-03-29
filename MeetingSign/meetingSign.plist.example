@@ -12,8 +12,14 @@
 			not installed.
 			If you want to use the built-in Apple Python3 which comes with Xcode Command Line, just change
 			this next line to be "python3" without the quotes.
+
+		  <string>/opt/homebrew/bin/python3</string>
+
+      macOS recently took the same path as many Linux OSes where almost all pip packages need to be 
+      installed within a virtual environment. Therefore calling python from the virtual environment
+      is necessary.
 		-->
-		<string>/opt/homebrew/bin/python3</string>
+    <string>/Users/foo/python_virtual_environment/bin/python3</string>
 		<!--
 			Replace <user> everywhere in this file with your username on your mac. Also, if you cloned this
 			from git, just put the path to the python script here.

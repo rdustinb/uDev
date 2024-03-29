@@ -5,6 +5,7 @@ from serial import Serial
 import configparser
 import os
 import time
+import sys
 
 # Used to Colorize the state data
 from sty import fg, bg, ef, rs, Style, RgbFg
@@ -15,11 +16,29 @@ LEDPWMSTEPS = 16
 
 RESET = '\033[m'
 
+# Branch if this respose is to be colorless or not...
+try:
+    if sys.argv[1] == "NOCOLORS":
+        withColors = False
+    else:
+        withColors = True
+except:
+    withColors = True
+
 def get_color_escape(vals):
     r = int(255*int(vals[0])/LEDPWMSTEPS)
     g = int(255*int(vals[1])/LEDPWMSTEPS)
     b = int(255*int(vals[2])/LEDPWMSTEPS)
-    return '\033[38;2;{};{};{}m'.format(r, g, b)
+    if withColors:
+        if r == 0 and g == 0 and b == 0:
+            return '\033[38;2;{};{};{}m.\033[m'.format(r, g, b)
+        else:
+            return '\033[38;2;{};{};{}mO\033[m'.format(r, g, b)
+    else:
+        if r == 0 and g == 0 and b == 0:
+            return '.'
+        else:
+            return 'O'
 
 # For updating the configuation file:
 configFile = os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.ini")
@@ -45,14 +64,14 @@ try:
     # Get the response...
     thisResponse = serialIF.readline().decode('UTF-8').split(",")
     if int(thisResponse[-1]) == 0:
-        print(get_color_escape(thisResponse[ 0: 3]) + "o" +       
-              get_color_escape(thisResponse[ 3: 6]) + "o" +       
-              get_color_escape(thisResponse[ 6: 9]) + "o" +       
-              get_color_escape(thisResponse[ 9:12]) + "o" +       
-              get_color_escape(thisResponse[12:15]) + "o" +       
-              get_color_escape(thisResponse[15:18]) + "o" +       
-              get_color_escape(thisResponse[18:21]) + "o" +       
-              get_color_escape(thisResponse[21:24]) + "o" + RESET)
+        print(get_color_escape(thisResponse[ 0: 3]) +       
+              get_color_escape(thisResponse[ 3: 6]) +       
+              get_color_escape(thisResponse[ 6: 9]) +       
+              get_color_escape(thisResponse[ 9:12]) +       
+              get_color_escape(thisResponse[12:15]) +       
+              get_color_escape(thisResponse[15:18]) +       
+              get_color_escape(thisResponse[18:21]) +       
+              get_color_escape(thisResponse[21:24]))
     else:
         print("Read of state failed.")
     
