@@ -87,7 +87,9 @@ if ENABLE_CALENDAR_FETCH:
     for thisEvent in calendarService.events(from_dt=datetime.today(), to_dt=datetime.today()):
       if(thisEvent['pGuid'] == config.get('DEFAULT', 'myCalendarpGuid')): # workCalGUID):
         # Check if this is an all-day event, don't light up the sign for that...
-        if not(config.get('DEFAULT', 'enableAllDayEvents')):
+        if config.get('DEFAULT', 'enableAllDayEvents').lower() == "false":
+            # The configuration, though read from a python.ini file, still comes in as a String
+            # so the above if statement needs to compare against a string value...
             if(thisEvent['startDate'][4] == 0 and thisEvent['startDate'][5] == 0):
                 if(thisEvent['endDate'][4] == 0 and thisEvent['endDate'][5] == 0):
                     continue
