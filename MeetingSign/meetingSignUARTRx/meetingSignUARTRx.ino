@@ -43,7 +43,7 @@ void loop() {
 void process_uart_packet(){
   /*******************************************************************/
   // Read in all bytes
-  for(uint8_t thisByte=0; thisByte<100; thisByte++){
+  for(uint8_t thisByte=0; thisByte<200; thisByte++){
     packetBytes[thisByte] = Serial.read();
     if(packetBytes[thisByte] == EOP){
       packetLastByte = thisByte; // Store the last byte index

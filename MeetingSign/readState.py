@@ -57,12 +57,25 @@ for p in port:
 try:
     # Setup and Write to the Serial Device
     serialIF = Serial(thisDevice, config.get('DEFAULT', 'arduinoSerialBaud'), timeout=0.5)
+except Exception as e:
+    print(e)
+    print("Setting up the serial interface failed...")
     
+try:
     # Send a read command, will get back 64 bytes
     serialIF.write('R.\r\n'.encode('raw_unicode_escape'))
+except Exception as e:
+    print(e)
+    print("Sending a read command failed...")
     
+try:
     # Get the response...
     thisResponse = serialIF.readline().decode('UTF-8').split(",")
+except Exception as e:
+    print(e)
+    print("The response returned was invalid...")
+
+try:
     if int(thisResponse[-1]) == 0:
         print(get_color_escape(thisResponse[ 0: 3]) +       
               get_color_escape(thisResponse[ 3: 6]) +       
@@ -74,9 +87,13 @@ try:
               get_color_escape(thisResponse[21:24]))
     else:
         print("Read of state failed.")
+except Exception as e:
+    print(e)
+    print("Response size seems out of bounds...")
     
+try:
     # Close the IF
     serialIF.close()
 except Exception as e:
     print(e)
-    print("Reading the meeting sign through the USB interface failed...")
+    print("Closing the serial interface failed...")

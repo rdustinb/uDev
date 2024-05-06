@@ -4,7 +4,7 @@
 //#include "spi_led_pkg.h"
 
 // Receive a Byte Packet
-uint8_t packetBytes[100];
+uint8_t packetBytes[200];
 uint8_t packetLastByte;
 
 struct {
