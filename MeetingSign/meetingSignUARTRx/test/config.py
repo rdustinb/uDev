@@ -1,1 +1,0 @@
-arduinoSerialBaud=115200
